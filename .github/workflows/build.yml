@@ -14,17 +14,8 @@ jobs:
           done
           git clone https://github.com/gbl08ma/libfxcg.git /tmp/libfxcg
           make -C /tmp/libfxcg
-          (git clone https://github.com/prizmsdk/mkg3a.git /tmp/mkg3a || \
-           git clone https://github.com/Heath/mkg3a.git /tmp/mkg3a || \
-           git clone https://github.com/Lephenixnoir/fxsdk.git /tmp/fxsdk)
-          if [ -d /tmp/mkg3a ]; then
-            if [ -f /tmp/mkg3a/CMakeLists.txt ]; then
-              cmake -B /tmp/mkg3a/build -S /tmp/mkg3a && cmake --build /tmp/mkg3a/build
-            else
-              make -C /tmp/mkg3a && mkdir -p /tmp/mkg3a/build && cp /tmp/mkg3a/mkg3a /tmp/mkg3a/build/
-            fi
-          else
-            cmake -B /tmp/fxsdk/build -S /tmp/fxsdk && cmake --build /tmp/fxsdk/build --target fxgxa
+          if git clone https://github.com/taricorp/mkg3a.git /tmp/mkg3a; then
+            cmake -B /tmp/mkg3a/build -S /tmp/mkg3a && cmake --build /tmp/mkg3a/build
           fi
       - name: Compilar VIGAS.g3a
         run: |
@@ -46,7 +37,27 @@ jobs:
           if [ -f /tmp/mkg3a/build/mkg3a ]; then
             /tmp/mkg3a/build/mkg3a -n basic:VIGAS VIGAS.bin VIGAS.g3a
           else
-            /tmp/fxsdk/build/fxgxa -o VIGAS.g3a VIGAS.bin
+            prizm-objcopy -O binary VIGAS.bin VIGAS_raw.bin
+            python3 -c '
+          import struct
+          raw = open("VIGAS_raw.bin", "rb").read()
+          raw += b"\xFF" * ((4 - len(raw) % 4) % 4)
+          hdr = bytearray(b"\xFF" * 0x7000)
+          hdr[0:8] = bytes([b ^ 0xFF for b in b"USBPower"])
+          hdr[8:16] = b"\xFE\xFF\xFF\xFF\xFF\xFF\x00\xFE"
+          total = 0x7000 + len(raw)
+          hdr[0x10:0x14] = struct.pack(">I", total ^ 0xFFFFFFFF)
+          hdr[0x30:0x36] = b"@VIGAS"
+          hdr[0x40:0x4A] = b"01.00.0000"
+          hdr[0x50:0x5E] = b"2026.1124.0821"
+          for off in range(0x5C60, 0x5C60 + 8*24, 24):
+              hdr[off:off+5] = b"VIGAS"
+          hdr[0x6FF4:0x6FF8] = struct.pack(">I", len(raw))
+          hdr[0x20:0x24] = b"\x00\x00\x00\x00"
+          csum = (sum(hdr[0:0x20]) + sum(hdr[0x24:]) + sum(raw)) & 0xFFFFFFFF
+          hdr[0x20:0x24] = struct.pack(">I", csum)
+          open("VIGAS.g3a", "wb").write(hdr + raw)
+          '
           fi
       - uses: actions/upload-artifact@v4
         with:
