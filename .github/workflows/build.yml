@@ -1,0 +1,21 @@
+name: Compilar G3A
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Instalar PrizmSDK y compilar
+        run: |
+          git clone https://github.com/Jonimus/PrizmSDK.git /opt/PrizmSDK
+          mkdir -p /opt/PrizmSDK/projects/VIGAS/src
+          cp main.c /opt/PrizmSDK/projects/VIGAS/src/main.c
+          cp -r /opt/PrizmSDK/projects/example/* /opt/PrizmSDK/projects/VIGAS/
+          cp main.c /opt/PrizmSDK/projects/VIGAS/src/main.c
+          export PATH="/opt/PrizmSDK/bin:$PATH"
+          make -C /opt/PrizmSDK/projects/VIGAS
+          cp /opt/PrizmSDK/projects/VIGAS/*.g3a ./VIGAS.g3a
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VIGAS-fxCG50
+          path: VIGAS.g3a
