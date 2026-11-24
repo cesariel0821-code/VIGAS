@@ -87,8 +87,14 @@ static void str_cat(char *dst, const char *src) {
     dst[i] = '\0';
 }
 
+/* buf necesita 32 bytes. Rechaza NaN, infinitos y valores enormes
+   para que nunca se desborde ni se quede en un bucle. */
 static void fmt_num(char *buf, double val, int dec) {
     int idx = 0;
+    if (!(val == val)) { strcpy(buf, "?"); return; }
+    if (!(val > -1e15 && val < 1e15)) { strcpy(buf, "?"); return; }
+    if (dec < 0) dec = 0;
+    if (dec > 6) dec = 6;
     double mult = 1.0;
     for (int i = 0; i < dec; i++) mult *= 10.0;
     double threshold = 0.5 / mult;
@@ -98,7 +104,7 @@ static void fmt_num(char *buf, double val, int dec) {
     long long imult = (long long)(mult + 0.5);
     long long ipart = (dec > 0) ? (scaled / imult) : scaled;
     long long fpart = (dec > 0) ? (scaled % imult) : 0;
-    char tmp[24];
+    char tmp[32];
     int tlen = 0;
     if (ipart == 0) tmp[tlen++] = '0';
     else while (ipart > 0 && tlen < 20) { tmp[tlen++] = (char)('0' + (ipart % 10)); ipart /= 10; }
@@ -115,13 +121,14 @@ static void fmt_num(char *buf, double val, int dec) {
 static void fmt_sig(char *buf, double v) {
     double a = my_fabs(v);
     buf[0] = '\0';
+    if (!(v == v) || !(a < 1e300)) { strcpy(buf, "?"); return; }
     if (a < 1e-9) { strcpy(buf, "0"); return; }
     if (a >= 1e9 || a < 1e-4) {
         int ex = 0;
         double m = a;
         while (m >= 10.0) { m /= 10.0; ex++; }
         while (m < 1.0) { m *= 10.0; ex--; }
-        char mb[16], eb[8];
+        char mb[32], eb[16];
         fmt_num(mb, m, 3);
         if (v < 0.0) strcpy(buf, "-");
         str_cat(buf, mb);
@@ -142,6 +149,7 @@ static void fmt_sig(char *buf, double v) {
 static void fmt_short(char *buf, double v) {
     double a = my_fabs(v);
     buf[0] = '\0';
+    if (!(v == v) || !(a < 1e300)) { strcpy(buf, "?"); return; }
     if (a < 1e-9) { strcpy(buf, "0"); return; }
     int ex = 0;
     double m = a;
@@ -149,7 +157,7 @@ static void fmt_short(char *buf, double v) {
     while (m < 1.0) { m *= 10.0; ex--; }
     m = (double)(long long)(m * 100.0 + 0.5) / 100.0;
     if (m >= 10.0) { m /= 10.0; ex++; }
-    char mb[12], eb[6];
+    char mb[32], eb[16];
     fmt_num(mb, m, 2);
     if (v < 0.0) strcpy(buf, "-");
     str_cat(buf, mb);
@@ -178,10 +186,23 @@ static int parse_num(const char *s, double *out) {
 /* ============================================================
    3. Primitivas graficas
    ============================================================ */
-static unsigned short *vram_ptr(void) { return (unsigned short *)GetVRAMAddress(); }
+static unsigned short *VP = 0;
+static unsigned short *vram_ptr(void) {
+    if (!VP) VP = (unsigned short *)GetVRAMAddress();
+    return VP;
+}
 
 static void fill_rect(int x, int y, int w, int h, unsigned short color) {
     unsigned short *v = vram_ptr();
+    /* recorta antes de sumar: evita que x+w desborde el entero y
+       termine escribiendo fuera de la memoria de pantalla */
+    if (w <= 0 || h <= 0) return;
+    if (x >= SCREEN_W || y >= SCREEN_H) return;
+    if (x < -SCREEN_W) { w += x + SCREEN_W; x = -SCREEN_W; }
+    if (y < -SCREEN_H) { h += y + SCREEN_H; y = -SCREEN_H; }
+    if (w <= 0 || h <= 0) return;
+    if (w > 2 * SCREEN_W) w = 2 * SCREEN_W;
+    if (h > 2 * SCREEN_H) h = 2 * SCREEN_H;
     int x2 = x + w, y2 = y + h;
     if (x < 0) x = 0;
     if (y < 0) y = 0;
@@ -420,8 +441,15 @@ static double clampd(double v, double lo, double hi) {
 }
 
 /* ajusta las dimensiones a valores geometricamente posibles */
+#define DIM_MAX 1.0e7
+
 static void sanitize(void) {
     const SecDef *s = &SEC[sec_type];
+    for (int i = 0; i < 7; i++) {
+        if (!(dim[i] == dim[i])) dim[i] = 1.0;        /* NaN */
+        if (dim[i] > DIM_MAX) dim[i] = DIM_MAX;
+        if (dim[i] < -DIM_MAX) dim[i] = -DIM_MAX;
+    }
     for (int i = 0; i < s->ndim; i++) if (dim[i] < 0.0) dim[i] = -dim[i];
     for (int i = 0; i < s->ndim; i++) if (dim[i] < 0.01 && !(sec_type == S_2ANG && i == 3)) dim[i] = 0.01;
     double rmax = 0.0;
@@ -750,6 +778,11 @@ static void recompute(void) {
     R_ang = 0.5 * my_atan2(-2.0 * R_Ixy, R_Ix - R_Iy) * 180.0 / PI;
     R_rmin = my_sqrt((R_Imin > 0.0 ? R_Imin : 0.0) / R_A);
     R_Cw = (h0 > 0.0) ? R_Iy * h0 * h0 / 4.0 : 0.0;
+    /* todo debe ser finito antes de dibujar o formatear */
+    double chk[10] = { R_A, R_xc, R_yc, R_Ix, R_Iy, R_Zx, R_Zy, R_x9 - R_x0, R_y9 - R_y0, R_J };
+    for (int i = 0; i < 10; i++)
+        if (!(chk[i] == chk[i]) || !(chk[i] > -1e300 && chk[i] < 1e300)) return;
+    if (R_x9 <= R_x0 || R_y9 <= R_y0) return;
     R_ok = 1;
 }
 
@@ -759,8 +792,17 @@ static void recompute(void) {
 static int g_bx, g_by, g_bw, g_bh;
 static double g_sc, g_ox, g_oy;
 
-static int GX(double x) { return g_ox + (x - R_x0) * g_sc; }
-static int GY(double y) { return g_oy - (y - R_y0) * g_sc; }
+/* coordenadas de dibujo acotadas: convertir a entero un double fuera
+   de rango es comportamiento indefinido y puede acabar en escrituras
+   fuera de la pantalla */
+static int gclamp(double v) {
+    if (!(v == v)) return 0;
+    if (v < -4000.0) return -4000;
+    if (v > 4000.0) return 4000;
+    return (int)v;
+}
+static int GX(double x) { return gclamp(g_ox + (x - R_x0) * g_sc); }
+static int GY(double y) { return gclamp(g_oy - (y - R_y0) * g_sc); }
 
 /* contorno = pixel de relleno vecino al fondo (silueta, sin lineas internas) */
 static void silhouette(int x, int y, int w, int h) {
@@ -786,6 +828,7 @@ static void draw_section(int bx, int by, int bw, int bh, int full) {
     double s1 = (double)(bw - 2 * mg) / dx;
     double s2 = (double)(bh - 2 * mg) / dy;
     g_sc = s1 < s2 ? s1 : s2;
+    if (!(g_sc > 0.0) || !(g_sc < 1e6)) return;
     g_ox = bx + (bw - dx * g_sc) / 2.0;
     g_oy = by + (bh + dy * g_sc) / 2.0;
 
@@ -834,7 +877,15 @@ static void draw_section(int bx, int by, int bw, int bh, int full) {
                           GX(EL[i].x2) - GX(EL[i].x1),
                           GY(EL[i].y1) - GY(EL[i].y2), C_WHITE);
     }
-    silhouette(bx, by, bw, bh);
+    {   /* recorrer solo el recuadro ocupado por la seccion */
+        int sx1 = GX(R_x0) - 2, sx2 = GX(R_x9) + 2;
+        int sy1 = GY(R_y9) - 2, sy2 = GY(R_y0) + 2;
+        if (sx1 < bx) sx1 = bx;
+        if (sy1 < by) sy1 = by;
+        if (sx2 > bx + bw) sx2 = bx + bw;
+        if (sy2 > by + bh) sy2 = by + bh;
+        if (sx2 > sx1 && sy2 > sy1) silhouette(sx1, sy1, sx2 - sx1, sy2 - sy1);
+    }
 
     if (!full) return;
     /* ejes neutros plasticos */
@@ -852,7 +903,7 @@ static void draw_section(int bx, int by, int bw, int bh, int full) {
    ============================================================ */
 static int edit_number(const char *title, const char *dsc, const char *unit,
                        double *target, char first_char) {
-    char buf[20];
+    char buf[32];
     int len = 0;
     if (first_char != 0) {
         buf[0] = first_char; buf[1] = '\0'; len = 1;
@@ -871,7 +922,7 @@ static int edit_number(const char *title, const char *dsc, const char *unit,
 
         fill_rect(bx + 14, by + 42, bw - 28, 28, C_LBLUE);
         draw_rect(bx + 14, by + 42, bw - 28, 28, C_BLUE);
-        char disp[28];
+        char disp[48];
         strcpy(disp, buf);
         str_cat(disp, "_");
         draw_text_bold(bx + 22, by + 48, disp, C_BLACK, C_LBLUE, 1);
@@ -887,6 +938,8 @@ static int edit_number(const char *title, const char *dsc, const char *unit,
             double v;
             if (parse_num(buf, &v)) {
                 if (v < 0.0) v = -v;
+                if (!(v == v)) v = 1.0;
+                if (v > DIM_MAX) v = DIM_MAX;
                 *target = v;
                 return 1;
             }
@@ -897,11 +950,11 @@ static int edit_number(const char *title, const char *dsc, const char *unit,
         } else if (key == KEY_CTRL_AC) {
             len = 0; buf[0] = '\0';
         } else if (key >= KEY_CHAR_0 && key <= KEY_CHAR_9) {
-            if (len < 14) { buf[len++] = (char)('0' + (key - KEY_CHAR_0)); buf[len] = '\0'; }
+            if (len < 10) { buf[len++] = (char)('0' + (key - KEY_CHAR_0)); buf[len] = '\0'; }
         } else if (key == KEY_CHAR_DP || key == KEY_CHAR_COMMA) {
             int hd = 0;
             for (int i = 0; i < len; i++) if (buf[i] == '.') hd = 1;
-            if (!hd && len < 14) {
+            if (!hd && len < 10) {
                 if (len == 0) buf[len++] = '0';
                 buf[len++] = '.'; buf[len] = '\0';
             }
@@ -1007,7 +1060,7 @@ static void draw_list(const char *title) {
     int y = CY0 + HDR + 4;
 
     for (int i = *sc; i < NL && i < *sc + vis; i++) {
-        char val[32], num[24], u[8];
+        char val[40], num[40], u[12];
         if (LN[i].kind == 2) {
             draw_text(16, y, LN[i].txt, LN[i].col, C_WHITE, 1);
         } else if (LN[i].kind == 1) {
@@ -1029,7 +1082,7 @@ static void draw_list(const char *title) {
 
     scroll_bar(NL, vis, *sc);
     if (NL > vis) {
-        char ind[20], nb[8];
+        char ind[40], nb[24];
         fmt_num(nb, (double)(*sc + 1), 0);
         strcpy(ind, nb);
         str_cat(ind, "-");
@@ -1047,7 +1100,7 @@ static void draw_chrome(void) {
 
     fill_rect(0, 0, SCREEN_W, TOPH, C_NAVY);
     draw_text_bold(8, 4, "SECPROP", C_WHITE, C_NAVY, 1);
-    char info[32];
+    char info[48];
     strcpy(info, SEC[sec_type].shortn);
     if (SEC[sec_type].fil_ok && use_fil) str_cat(info, " +r");
     str_cat(info, "  ");
@@ -1140,7 +1193,7 @@ static void render_datos(void) {
         fill_rect(11, y - 3, 362 - bar, ROW, bg);
         const char *lbl = (i < s->ndim) ? s->lbl[i] : "r";
         const char *dsc = (i < s->ndim) ? s->dsc[i] : "radio acuerdo";
-        char v[24], u[8];
+        char v[40], u[12];
         draw_text_bold(16, y, lbl, sel ? C_WHITE : C_BLUE, bg, 1);
         draw_text(16 + 4 * FW, y, dsc, sel ? C_LBLUE : C_SLATE, bg, 1);
         fmt_num(v, dim[i], 2);
@@ -1153,7 +1206,7 @@ static void render_datos(void) {
     scroll_bar(nd, vis, *sc);
 }
 
-static char B1[16], B2[16], B3[16];
+static char B1[40], B2[40], B3[40];
 
 static void render_geom(void) {
     L_clear();
@@ -1221,7 +1274,7 @@ static void render_tors(void) {
 }
 
 static void render_dibujo(void) {
-    char t[32], u[8];
+    char t[48], u[12];
     u_suf(u, 1);
     strcpy(t, "SECCION A ESCALA (");
     str_cat(t, u);
@@ -1288,7 +1341,7 @@ static void handle_key(int key) {
         else if (key == KEY_CTRL_EXE) {
             const char *lbl = (cur_dato < s->ndim) ? s->lbl[cur_dato] : "r";
             const char *dsc = (cur_dato < s->ndim) ? s->dsc[cur_dato] : "radio de acuerdo";
-            char ttl[40];
+            char ttl[64];
             strcpy(ttl, lbl);
             str_cat(ttl, " : ");
             str_cat(ttl, dsc);
