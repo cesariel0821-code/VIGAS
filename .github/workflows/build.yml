@@ -85,8 +85,8 @@ jobs:
           python3 -c '
           import struct
           raw = open("VIGAS_raw.bin", "rb").read()
-          raw += b"\xFF" * ((4 - len(raw) % 4) % 4)
-          hdr = bytearray(b"\xFF" * 0x7000)
+          raw += b"\x00" * ((4 - len(raw) % 4) % 4)
+          hdr = bytearray(0x7000)
           hdr[0x00:0x08] = bytes([b ^ 0xFF for b in b"USBPower"])
           hdr[0x08:0x10] = b"\xFE\xFF\xFF\xFF\xFF\xFF\x00\xFE"
           total = 0x7000 + len(raw)
@@ -95,10 +95,28 @@ jobs:
           hdr[0x14:0x18] = struct.pack(">I", csum_hdr ^ 0xFFFFFFFF)
           hdr[0x30:0x37] = b"@VIGAS\x00"
           hdr[0x40:0x4B] = b"01.00.0000\x00"
-          hdr[0x50:0x5F] = b"2026.1124.0825\x00"
+          hdr[0x50:0x5F] = b"2026.1124.0835\x00"
           for i in range(8):
               off = 0x60 + i * 24
               hdr[off:off+6] = b"VIGAS\x00"
+          def make_icon(selected):
+              bg = 0x001F if selected else 0xFFFF
+              fg = 0xFFFF if selected else 0x001F
+              sup = 0xFFE0 if selected else 0xF800
+              buf = bytearray(92 * 64 * 2)
+              for y in range(64):
+                  for x in range(92):
+                      c = bg
+                      if x < 2 or x >= 90 or y < 2 or y >= 62:
+                          c = fg
+                      elif 26 <= y <= 31 and 12 <= x <= 80:
+                          c = fg
+                      elif 32 <= y <= 44 and (abs(x - 16) <= (y - 32) // 2 or abs(x - 76) <= (y - 32) // 2):
+                          c = sup
+                      struct.pack_into(">H", buf, (y * 92 + x) * 2, c)
+              return buf
+          hdr[0x1000:0x3E00] = make_icon(False)
+          hdr[0x4000:0x6E00] = make_icon(True)
           hdr[0x6FF4:0x6FF8] = struct.pack(">I", len(raw))
           csum_body = (sum(hdr[0x24:]) + sum(raw)) & 0xFFFFFFFF
           hdr[0x20:0x24] = struct.pack(">I", csum_body)
