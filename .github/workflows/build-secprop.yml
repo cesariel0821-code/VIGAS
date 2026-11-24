@@ -1,0 +1,97 @@
+name: Compilar SECPROP G3A
+on:
+  push:
+    paths:
+      - 'secprop/**'
+      - '.github/workflows/build-secprop.yml'
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Instalar compilador y librerias fx-CG50
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-sh-elf binutils-sh-elf cmake build-essential libpng-dev
+          for tool in gcc g++ ar as ld objcopy ranlib strip; do
+            sudo ln -sf /usr/bin/sh-elf-$tool /usr/local/bin/prizm-$tool
+          done
+          git clone https://github.com/gbl08ma/libfxcg.git /tmp/libfxcg
+          make -C /tmp/libfxcg
+          git clone https://gitlab.com/taricorp/mkg3a.git /tmp/mkg3a
+          cmake -B /tmp/mkg3a/build -S /tmp/mkg3a
+          cmake --build /tmp/mkg3a/build
+      - name: Compilar SECPROP.g3a
+        run: |
+          cat << 'EOF' > /tmp/math_shim.h
+          #ifndef MATH_SHIM_H
+          #define MATH_SHIM_H
+          double fabs(double x);
+          double round(double x);
+          double sqrt(double x);
+          #endif
+          EOF
+          cat << 'EOF' > /tmp/math_shim.c
+          #include <stddef.h>
+          double fabs(double x) { return x < 0.0 ? -x : x; }
+          double round(double x) { return x >= 0.0 ? (double)(long long)(x + 0.5) : (double)(long long)(x - 0.5); }
+          double sqrt(double x) {
+            if (x <= 0.0) return 0.0;
+            double r = x > 1.0 ? x : 1.0;
+            for (int i = 0; i < 30; i++) r = 0.5 * (r + x / r);
+            return r;
+          }
+          unsigned int __udivsi3_i4i(unsigned int n, unsigned int d) {
+            if (d == 0) return 0;
+            unsigned int q = 0, r = 0;
+            for (int i = 0; i < 32; i++) {
+              unsigned int carry = r >> 31;
+              r = (r << 1) | (n >> 31);
+              n <<= 1;
+              q <<= 1;
+              if (carry || r >= d) {
+                r -= d;
+                q |= 1U;
+              }
+            }
+            return q;
+          }
+          int __sdivsi3_i4i(int a, int b) {
+            if (b == 0) return 0;
+            int neg = (a < 0) ^ (b < 0);
+            unsigned int ua = (a < 0) ? (0U - (unsigned int)a) : (unsigned int)a;
+            unsigned int ub = (b < 0) ? (0U - (unsigned int)b) : (unsigned int)b;
+            unsigned int uq = __udivsi3_i4i(ua, ub);
+            return neg ? (int)(0U - uq) : (int)uq;
+          }
+          EOF
+          LDSCRIPT=$(find /tmp/libfxcg -name "prizm.x" | head -n 1)
+          python3 -c '
+          import re
+          p = open("'"$LDSCRIPT"'").read()
+          p = re.sub(r"(\.rodata\s*:\s*\{)", r"\1 . = ALIGN(4); ", p)
+          p = re.sub(r"(\*\(\.rodata\.\*\))", r"\1 . = ALIGN(4); ", p)
+          for sym in ["_mdata", "_sdata", "_edata", "_bbss", "_ebss", "__bss_start", "_end"]:
+              p = p.replace(sym + " =", ". = ALIGN(4); " + sym + " =")
+              p = p.replace(sym + "=", ". = ALIGN(4); " + sym + "=")
+          open("/tmp/prizm_aligned.x", "w").write(p)
+          '
+          LIBDIR=$(dirname $(find /tmp/libfxcg -name "libfxcg.a" | head -n 1))
+          CRT0_SRC=$(find /tmp/libfxcg -iname "crt0.s" | head -n 1)
+          LIBGCC=$(prizm-gcc -m4a-nofpu -mb -print-libgcc-file-name)
+          MKG3A=$(find /tmp/mkg3a -type f -name "mkg3a" -executable | head -n 1)
+          prizm-gcc -m4a-nofpu -mb -I/tmp/libfxcg/include -c "$CRT0_SRC" -o /tmp/crt0.o
+          prizm-gcc -m4a-nofpu -mb -O2 -falign-functions=4 -fno-builtin -include /tmp/math_shim.h -I/tmp/libfxcg/include -c secprop/main.c -o main.o
+          prizm-gcc -m4a-nofpu -mb -O2 -falign-functions=4 -fno-builtin -c /tmp/math_shim.c -o /tmp/math_shim.o
+          prizm-gcc -m4a-nofpu -mb -T/tmp/prizm_aligned.x -Wl,-static -nostdlib /tmp/crt0.o main.o /tmp/math_shim.o -L"$LIBDIR" -Wl,--start-group -lfxcg -lc "$LIBGCC" -Wl,--end-group -o SECPROP.bin
+          if head -c 4 SECPROP.bin | grep -q $'\x7fELF'; then
+            prizm-objcopy -O binary SECPROP.bin SECPROP_raw.bin
+          else
+            cp SECPROP.bin SECPROP_raw.bin
+          fi
+          "$MKG3A" -n basic:SECPROP SECPROP_raw.bin SECPROP.g3a
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SECPROP-fxCG50
+          path: SECPROP.g3a
