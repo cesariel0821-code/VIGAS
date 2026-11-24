@@ -138,6 +138,27 @@ static void fmt_sig(char *buf, double v) {
     fmt_num(buf, v, dec);
 }
 
+/* formato compacto de respaldo: como maximo 8 caracteres */
+static void fmt_short(char *buf, double v) {
+    double a = my_fabs(v);
+    buf[0] = '\0';
+    if (a < 1e-9) { strcpy(buf, "0"); return; }
+    int ex = 0;
+    double m = a;
+    while (m >= 10.0) { m /= 10.0; ex++; }
+    while (m < 1.0) { m *= 10.0; ex--; }
+    m = (double)(long long)(m * 100.0 + 0.5) / 100.0;
+    if (m >= 10.0) { m /= 10.0; ex++; }
+    char mb[12], eb[6];
+    fmt_num(mb, m, 2);
+    if (v < 0.0) strcpy(buf, "-");
+    str_cat(buf, mb);
+    str_cat(buf, "e");
+    if (ex < 0) { str_cat(buf, "-"); ex = -ex; } else str_cat(buf, "+");
+    fmt_num(eb, (double)ex, 0);
+    str_cat(buf, eb);
+}
+
 static int parse_num(const char *s, double *out) {
     int i = 0, sign = 1, has = 0;
     double iv = 0.0, fv = 0.0, fd = 1.0;
@@ -207,11 +228,40 @@ static void draw_text_bold(int x, int y, const char *txt, unsigned short fg, uns
     draw_text(x + 1, y, txt, fg, bg, 1);
 }
 
+/* ---- metricas reales de la fuente, medidas al arrancar ---- */
+static int FW = 10;   /* ancho de caracter  */
+static int FH = 16;   /* alto de caracter   */
+static int TOPH = 22, TABY = 192, CY0 = 26, CY1 = 188, HDR = 19, ROW = 19;
+
+static int tw_px(const char *s) { return FW * (int)strlen(s); }
+
+static void calibrate(void) {
+    fill_rect(0, 0, SCREEN_W, 60, C_WHITE);
+    int x = 0, y = 0;
+    PrintMini(&x, &y, "MMMMMMMMMM", 0x02, 0xFFFFFFFF, 0, 0, C_BLACK, C_WHITE, 1, 0);
+    if (x >= 30 && x <= 200) FW = x / 10;
+    int bot = -1;
+    for (int py = 0; py < 60; py++) {
+        for (int px = 0; px < SCREEN_W; px++)
+            if (get_px(px, py) != C_WHITE) { bot = py; break; }
+    }
+    if (bot >= 6 && bot <= 40) FH = bot + 1;
+    fill_rect(0, 0, SCREEN_W, 60, C_WHITE);
+    TOPH = FH + 6;
+    TABY = SCREEN_H - (FH + 8);
+    CY0 = TOPH + 4;
+    CY1 = TABY - 4;
+    HDR = FH + 3;
+    ROW = FH + 3;
+    int avail = CY1 - CY0 - HDR - 8;
+    if (ROW * 7 > avail && avail > 42) ROW = avail / 7;
+}
+
 /* tarjeta con titulo */
 static void card(int x, int y, int w, int h, const char *title) {
     fill_rect(x, y, w, h, C_WHITE);
     draw_rect(x, y, w, h, C_BORDER);
-    fill_rect(x, y, w, 15, C_SLATE);
+    fill_rect(x, y, w, HDR, C_SLATE);
     draw_text(x + 5, y + 1, title, C_WHITE, C_SLATE, 1);
 }
 
@@ -235,21 +285,21 @@ typedef struct {
 } SecDef;
 
 static const SecDef SEC[S_NTIPOS] = {
- { "I / H simetrica", "I/H", 4, 1,
+ { "I simetrica", "I/H", 4, 1,
    {"h","b","tf","tw"},
-   {"altura total","ancho del ala","espesor del ala","espesor del alma"},
+   {"altura total","ancho del ala","espesor ala","espesor alma"},
    {300.0, 150.0, 10.7, 7.1}, 15.0 },
- { "I asimetrica (soldada)", "I asim", 6, 0,
+ { "I asimetrica", "I asim", 6, 0,
    {"d","bs","ts","bi","ti","tw"},
-   {"altura total","ancho ala sup.","espesor ala sup.","ancho ala inf.","espesor ala inf.","espesor del alma"},
+   {"altura total","ancho ala sup.","espesor ala sup","ancho ala inf.","espesor ala inf","espesor alma"},
    {400.0, 200.0, 12.0, 250.0, 15.0, 8.0}, 0.0 },
  { "Canal C / U", "C/U", 4, 1,
    {"d","bf","tf","tw"},
-   {"altura total","ancho del ala","espesor del ala","espesor del alma"},
+   {"altura total","ancho del ala","espesor ala","espesor alma"},
    {200.0, 75.0, 11.5, 6.0}, 10.0 },
  { "Perfil T", "T", 4, 1,
    {"d","bf","tf","tw"},
-   {"altura total","ancho del ala","espesor del ala","espesor del alma"},
+   {"altura total","ancho del ala","espesor ala","espesor alma"},
    {150.0, 200.0, 14.0, 9.0}, 10.0 },
  { "Angulo L", "L", 3, 1,
    {"h","b","t"},
@@ -257,25 +307,25 @@ static const SecDef SEC[S_NTIPOS] = {
    {100.0, 100.0, 10.0}, 12.0 },
  { "Doble angulo 2L", "2L", 4, 1,
    {"h","b","t","s"},
-   {"ala vertical","ala horizontal","espesor","separacion entre alas"},
+   {"ala vertical","ala horizontal","espesor","separacion"},
    {100.0, 100.0, 10.0, 10.0}, 12.0 },
  { "Perfil Z", "Z", 4, 1,
    {"d","bf","tf","tw"},
-   {"altura total","ancho del ala","espesor del ala","espesor del alma"},
+   {"altura total","ancho del ala","espesor ala","espesor alma"},
    {200.0, 75.0, 8.0, 6.0}, 8.0 },
- { "G con labios (C.F.)", "G", 4, 0,
+ { "G con labios", "G", 4, 0,
    {"H","B","C","t"},
-   {"altura total","ancho del ala","largo del labio","espesor"},
+   {"altura total","ancho del ala","largo labio","espesor"},
    {200.0, 75.0, 20.0, 2.5}, 0.0 },
- { "Tubo rectangular", "Tubo R", 3, 0,
+ { "Tubo rectang.", "TubR", 3, 0,
    {"B","H","t"},
-   {"ancho exterior","altura exterior","espesor de pared"},
+   {"ancho exterior","altura exterior","espesor pared"},
    {150.0, 100.0, 6.0}, 0.0 },
- { "Tubo circular", "Tubo C", 2, 0,
+ { "Tubo circular", "TubC", 2, 0,
    {"D","t"},
-   {"diametro exterior","espesor de pared"},
+   {"diametro ext.","espesor pared"},
    {168.3, 5.0}, 0.0 },
- { "Placa rectangular", "Placa", 2, 0,
+ { "Placa rect.", "Placa", 2, 0,
    {"b","h"},
    {"ancho","altura"},
    {300.0, 20.0}, 0.0 },
@@ -784,7 +834,7 @@ static int edit_number(const char *title, const char *dsc, const char *unit,
         len = (int)strlen(buf);
     }
     while (1) {
-        int bx = 36, by = 42, bw = 312, bh = 120;
+        int bx = 16, by = 40, bw = 352, bh = 124;
         fill_rect(bx + 3, by + 3, bw, bh, C_GRAY);
         fill_rect(bx, by, bw, bh, C_WHITE);
         draw_rect(bx, by, bw, bh, C_NAVY);
@@ -798,10 +848,10 @@ static int edit_number(const char *title, const char *dsc, const char *unit,
         strcpy(disp, buf);
         str_cat(disp, "_");
         draw_text_bold(bx + 22, by + 48, disp, C_BLACK, C_LBLUE, 1);
-        draw_text(bx + bw - 44, by + 48, unit, C_NAVY, C_LBLUE, 1);
+        draw_text(bx + bw - 28 - tw_px(unit), by + 48, unit, C_NAVY, C_LBLUE, 1);
 
-        draw_text(bx + 14, by + 80, "[0-9 .] Escribir    [DEL] Borrar", C_SLATE, C_WHITE, 1);
-        draw_text(bx + 14, by + 97, "[EXE] Aceptar       [EXIT] Cancelar", C_BLUE, C_WHITE, 1);
+        draw_text(bx + 14, by + 78, "0-9 . escribe   DEL borra", C_SLATE, C_WHITE, 1);
+        draw_text(bx + 14, by + 78 + ROW, "EXE acepta   EXIT cancela", C_BLUE, C_WHITE, 1);
         Bdisp_PutDisp_DD();
 
         int key = 0;
@@ -835,102 +885,125 @@ static int edit_number(const char *title, const char *dsc, const char *unit,
 /* ============================================================
    9. Pantallas
    ============================================================ */
-static void u_suf(char *dst, int pow) {
+static void u_suf(char *dst, int pw) {
     strcpy(dst, UN[uidx]);
-    if (pow == 2) str_cat(dst, "2");
-    else if (pow == 3) str_cat(dst, "3");
-    else if (pow == 4) str_cat(dst, "4");
-    else if (pow == 6) str_cat(dst, "6");
+    if (pw == 2) str_cat(dst, "2");
+    else if (pw == 3) str_cat(dst, "3");
+    else if (pw == 4) str_cat(dst, "4");
+    else if (pw == 6) str_cat(dst, "6");
 }
 
-/* fila "etiqueta ....... valor unidad" */
-static void row_val(int x, int y, int w, const char *lbl, double v, int pow, unsigned short vc) {
-    char s[40], u[8];
+/* fila: etiqueta a la izquierda, valor alineado a la derecha.
+   Si no cabe con unidad, la quita; si aun no cabe, usa notacion corta. */
+static void row_val(int x, int y, int w, const char *lbl, double v, int pw, unsigned short vc) {
+    char s[32], num[24], u[8];
     draw_text(x, y, lbl, C_SLATE, C_WHITE, 1);
-    fmt_sig(s, v);
-    u_suf(u, pow);
-    str_cat(s, " ");
-    str_cat(s, u);
-    int tx = x + w - 4 - 6 * (int)strlen(s);
+    int lw = tw_px(lbl) + FW;
+    fmt_sig(num, v);
+    strcpy(s, num);
+    if (pw > 0) {
+        u_suf(u, pw);
+        str_cat(s, " ");
+        str_cat(s, u);
+    }
+    if (lw + tw_px(s) > w) strcpy(s, num);
+    if (lw + tw_px(s) > w) fmt_short(s, v);
+    int tx = x + w - tw_px(s);
+    if (tx < x + lw) tx = x + lw;
     draw_text_bold(tx, y, s, vc, C_WHITE, 1);
 }
 
 static void row_txt(int x, int y, int w, const char *lbl, const char *val, unsigned short vc) {
     draw_text(x, y, lbl, C_SLATE, C_WHITE, 1);
-    int tx = x + w - 4 - 6 * (int)strlen(val);
+    int lw = tw_px(lbl) + FW;
+    int tx = x + w - tw_px(val);
+    if (tx < x + lw) tx = x + lw;
     draw_text_bold(tx, y, val, vc, C_WHITE, 1);
 }
 
 static void draw_chrome(void) {
     fill_rect(0, 0, SCREEN_W, SCREEN_H, C_BG);
-    fill_rect(0, 0, SCREEN_W, 21, C_NAVY);
-    draw_text_bold(8, 3, "SECPROP", C_WHITE, C_NAVY, 1);
-    char info[48];
-    strcpy(info, SEC[sec_type].shortn);
-    if (SEC[sec_type].fil_ok) str_cat(info, use_fil ? " + r" : " sin r");
-    str_cat(info, "  |  ");
-    str_cat(info, UN[uidx]);
-    int tx = SCREEN_W - 10 - 6 * (int)strlen(info);
-    draw_text(tx, 3, info, C_LBLUE, C_NAVY, 1);
 
-    const char *tabs[6] = { "TIPO", "DATOS", "GEOM", "FLEX", "TORS", "DIBUJO" };
-    int yb = 192;
-    fill_rect(0, yb - 1, SCREEN_W, 1, C_BLACK);
+    /* barra superior */
+    fill_rect(0, 0, SCREEN_W, TOPH, C_NAVY);
+    draw_text_bold(8, 3, "SECPROP", C_WHITE, C_NAVY, 1);
+    char info[32];
+    strcpy(info, SEC[sec_type].shortn);
+    if (SEC[sec_type].fil_ok && use_fil) str_cat(info, " +r");
+    str_cat(info, " ");
+    str_cat(info, UN[uidx]);
+    draw_text(SCREEN_W - 8 - tw_px(info), 3, info, C_LBLUE, C_NAVY, 1);
+
+    /* barra de pestanas: clara, con la activa en azul */
+    const char *tabs[6] = { "TIPO", "DATOS", "GEOM", "FLEX", "TORS", "PLANO" };
+    fill_rect(0, TABY - 1, SCREEN_W, 1, C_SLATE);
     for (int i = 0; i < 6; i++) {
         int x = i * 64;
         int w = (i == 5) ? (SCREEN_W - x) : 64;
         int act = (i == active_tab);
-        unsigned short bg = act ? C_BLUE : C_SLATE;
-        fill_rect(x, yb, w, SCREEN_H - yb, bg);
-        if (i > 0) fill_rect(x, yb, 1, SCREEN_H - yb, C_BLACK);
+        unsigned short bg = act ? C_BLUE : C_LGRAY;
+        unsigned short fg = act ? C_WHITE : C_SLATE;
+        fill_rect(x, TABY, w, SCREEN_H - TABY, bg);
+        if (i > 0) fill_rect(x, TABY, 1, SCREEN_H - TABY, C_GRAY);
+        int tx = x + (w - tw_px(tabs[i])) / 2;
+        if (tx < x + 1) tx = x + 1;
         if (act) {
-            fill_rect(x + 2, yb + 1, w - 4, 2, C_LBLUE);
-            draw_text_bold(x + 10, yb + 5, tabs[i], C_WHITE, bg, 1);
+            fill_rect(x + 2, TABY + 1, w - 4, 2, C_LBLUE);
+            draw_text_bold(tx, TABY + 4, tabs[i], fg, bg, 1);
         } else {
-            draw_text(x + 11, yb + 5, tabs[i], C_WHITE, bg, 1);
+            draw_text(tx, TABY + 4, tabs[i], fg, bg, 1);
         }
     }
 }
 
+static int tipo_vx(const char *v) {
+    int x = 16 + 8 * FW;
+    if (x + tw_px(v) > 368) x = 368 - tw_px(v);
+    if (x < 16 + 8 * FW / 2) x = 16 + 8 * FW / 2;
+    return x;
+}
+
 static void render_tipo(void) {
-    card(8, 25, 240, 86, "1. ELEGIR LA SECCION");
-    int y = 46;
+    int h1 = HDR + 6 + 3 * ROW;
+    card(8, CY0, 368, h1, "1. LA SECCION");
+    int y = CY0 + HDR + 4;
     for (int i = 0; i < 3; i++) {
         int sel = (i == cur_tipo);
         unsigned short bg = sel ? C_LBLUE : C_WHITE;
-        fill_rect(11, y, 234, 19, bg);
-        if (sel) draw_rect(11, y, 234, 19, C_BLUE);
+        fill_rect(11, y - 1, 362, ROW, bg);
+        if (sel) draw_rect(11, y - 1, 362, ROW, C_BLUE);
         char v[40];
         if (i == 0) {
-            draw_text(16, y + 3, "Seccion", C_SLATE, bg, 1);
+            draw_text(16, y, "Perfil", C_SLATE, bg, 1);
             strcpy(v, "< ");
             str_cat(v, SEC[sec_type].name);
             str_cat(v, " >");
-            draw_text_bold(80, y + 3, v, C_NAVY, bg, 1);
+            draw_text_bold(tipo_vx(v), y, v, C_NAVY, bg, 1);
         } else if (i == 1) {
-            draw_text(16, y + 3, "Filetes", C_SLATE, bg, 1);
+            draw_text(16, y, "Filetes", C_SLATE, bg, 1);
             if (!SEC[sec_type].fil_ok) {
-                draw_text(80, y + 3, "no aplica a este perfil", C_GRAY, bg, 1);
+                draw_text(tipo_vx("no aplica"), y, "no aplica", C_GRAY, bg, 1);
             } else {
-                strcpy(v, use_fil ? "< SI  (radio r) >" : "< NO (aristas vivas) >");
-                draw_text_bold(80, y + 3, v, use_fil ? C_DGREEN : C_RED, bg, 1);
+                strcpy(v, use_fil ? "< SI, con r >" : "< NO, sin r >");
+                draw_text_bold(tipo_vx(v), y, v, use_fil ? C_DGREEN : C_RED, bg, 1);
             }
         } else {
-            draw_text(16, y + 3, "Unidades", C_SLATE, bg, 1);
+            draw_text(16, y, "Unidad", C_SLATE, bg, 1);
             strcpy(v, "< ");
             str_cat(v, UN[uidx]);
             str_cat(v, " >");
-            draw_text_bold(80, y + 3, v, C_NAVY, bg, 1);
+            draw_text_bold(tipo_vx(v), y, v, C_NAVY, bg, 1);
         }
-        y += 20;
+        y += ROW;
     }
-    card(254, 25, 122, 86, "VISTA PREVIA");
-    draw_section(256, 41, 118, 68, 0);
-
-    card(8, 117, 368, 54, "COMO SE USA");
-    draw_text(16, 136, "[<] [>] cambian la opcion marcada    [^] [v] mueven", C_SLATE, C_WHITE, 1);
-    draw_text(16, 151, "[F2] ingresar dimensiones    [F3][F4][F5] resultados", C_SLATE, C_WHITE, 1);
-    draw_text(10, 175, "F6 = dibujo de la seccion con CG y ejes plasticos", C_BLUE, C_BG, 1);
+    int y2 = CY0 + h1 + 4;
+    card(8, y2, 184, CY1 - y2, "VISTA PREVIA");
+    draw_section(10, y2 + HDR + 2, 180, CY1 - y2 - HDR - 4, 0);
+    card(196, y2, 180, CY1 - y2, "TECLAS");
+    int yk = y2 + HDR + 4;
+    draw_text(202, yk, "< >  cambiar", C_SLATE, C_WHITE, 1);
+    draw_text(202, yk + ROW, "^ v  mover", C_SLATE, C_WHITE, 1);
+    draw_text(202, yk + 2 * ROW, "F2  medidas", C_BLUE, C_WHITE, 1);
 }
 
 static void render_datos(void) {
@@ -939,149 +1012,153 @@ static void render_datos(void) {
     if (cur_dato >= nd) cur_dato = nd - 1;
     if (cur_dato < 0) cur_dato = 0;
 
-    char t[48];
-    strcpy(t, "2. DIMENSIONES  -  ");
+    char t[40];
+    strcpy(t, "2. MEDIDAS - ");
     str_cat(t, s->name);
-    card(8, 25, 250, 146, t);
+    card(8, CY0, 368, CY1 - CY0, t);
 
-    int y = 44;
+    int y = CY0 + HDR + 4;
     for (int i = 0; i < nd; i++) {
         int sel = (i == cur_dato);
         unsigned short bg = sel ? C_LBLUE : C_WHITE;
-        fill_rect(11, y, 244, 17, bg);
-        if (sel) draw_rect(11, y, 244, 17, C_BLUE);
+        fill_rect(11, y - 1, 362, ROW, bg);
+        if (sel) draw_rect(11, y - 1, 362, ROW, C_BLUE);
         const char *lbl = (i < s->ndim) ? s->lbl[i] : "r";
-        const char *dsc = (i < s->ndim) ? s->dsc[i] : "radio de acuerdo";
+        const char *dsc = (i < s->ndim) ? s->dsc[i] : "radio acuerdo";
         char v[24], u[8];
-        draw_text_bold(16, y + 2, lbl, C_BLUE, bg, 1);
-        draw_text(38, y + 2, dsc, C_SLATE, bg, 1);
+        draw_text_bold(16, y, lbl, C_BLUE, bg, 1);
+        draw_text(16 + 4 * FW, y, dsc, C_SLATE, bg, 1);
         fmt_num(v, dim[i], 2);
         u_suf(u, 1);
         str_cat(v, " ");
         str_cat(v, u);
-        int tx = 253 - 6 * (int)strlen(v);
-        draw_text_bold(tx, y + 2, v, C_BLACK, bg, 1);
-        y += 18;
+        draw_text_bold(370 - tw_px(v), y, v, C_BLACK, bg, 1);
+        y += ROW;
     }
-    card(264, 25, 112, 146, "ESQUEMA");
-    draw_section(266, 41, 108, 128, 0);
-    draw_text(10, 175, "[0-9] escribir  [EXE] editar  [^v] mover  [F3] ver", C_SLATE, C_BG, 1);
+    if (nd < 6) {
+        draw_text(16, y + 4, "Teclea un numero o EXE", C_GRAY, C_WHITE, 1);
+        draw_text(16, y + 4 + ROW, "para editar la medida.", C_GRAY, C_WHITE, 1);
+    }
 }
 
 static void render_geom(void) {
-    card(8, 25, 182, 146, "GEOMETRIA");
-    row_val(14, 46, 170, "Area  Ag", R_A, 2, C_BLUE);
-    row_val(14, 64, 170, "Altura  d", R_y9 - R_y0, 1, C_BLACK);
-    row_val(14, 82, 170, "Ancho  bf", R_x9 - R_x0, 1, C_BLACK);
-    fill_rect(14, 102, 170, 1, C_BORDER);
-    draw_text(14, 106, "Centro de gravedad", C_NAVY, C_WHITE, 1);
-    row_val(14, 124, 170, "xc  desde izq.", R_xc - R_x0, 1, C_RED);
-    row_val(14, 142, 170, "yc  desde base", R_yc - R_y0, 1, C_RED);
+    int H = CY1 - CY0;
+    card(8, CY0, 184, H, "GEOMETRIA");
+    int y = CY0 + HDR + 4;
+    row_val(14, y, 172, "Ag", R_A, 2, C_BLUE);           y += ROW;
+    row_val(14, y, 172, "d", R_y9 - R_y0, 1, C_BLACK);   y += ROW;
+    row_val(14, y, 172, "bf", R_x9 - R_x0, 1, C_BLACK);  y += ROW;
+    row_val(14, y, 172, "xc izq", R_xc - R_x0, 1, C_RED);   y += ROW;
+    row_val(14, y, 172, "yc base", R_yc - R_y0, 1, C_RED);  y += ROW;
+    row_val(14, y, 172, "rx", R_rx, 1, C_DGREEN);        y += ROW;
+    row_val(14, y, 172, "ry", R_ry, 1, C_DGREEN);
 
-    card(196, 25, 180, 146, "INERCIA Y GIRO");
-    row_val(202, 46, 168, "Ix", R_Ix, 4, C_BLUE);
-    row_val(202, 64, 168, "Iy", R_Iy, 4, C_BLUE);
-    row_val(202, 82, 168, "Ixy", R_Ixy, 4, C_BLACK);
-    fill_rect(202, 102, 168, 1, C_BORDER);
-    draw_text(202, 106, "Radios de giro", C_NAVY, C_WHITE, 1);
-    row_val(202, 124, 168, "rx", R_rx, 1, C_DGREEN);
-    row_val(202, 142, 168, "ry", R_ry, 1, C_DGREEN);
-    draw_text(10, 175, "Valores respecto a los ejes que pasan por el CG", C_SLATE, C_BG, 1);
+    card(196, CY0, 180, H, "INERCIA CG");
+    y = CY0 + HDR + 4;
+    row_val(202, y, 168, "Ix", R_Ix, 4, C_BLUE);   y += ROW;
+    row_val(202, y, 168, "Iy", R_Iy, 4, C_BLUE);   y += ROW;
+    row_val(202, y, 168, "Ixy", R_Ixy, 4, C_BLACK); y += ROW;
+    row_val(202, y, 168, "Imax", R_Imax, 4, C_DGREEN); y += ROW;
+    row_val(202, y, 168, "Imin", R_Imin, 4, C_DGREEN); y += ROW;
+    draw_text(202, y, "xc,yc desde", C_GRAY, C_WHITE, 1); y += ROW;
+    draw_text(202, y, "esq. inf.izq.", C_GRAY, C_WHITE, 1);
 }
 
 static void render_flex(void) {
-    card(8, 25, 182, 146, "MODULO ELASTICO  S = I/c");
-    row_val(14, 46, 170, "Sx superior", R_Sxs, 3, C_BLUE);
-    row_val(14, 64, 170, "Sx inferior", R_Sxi, 3, C_BLUE);
-    row_val(14, 82, 170, "Sy izquierda", R_Syl, 3, C_BLACK);
-    row_val(14, 100, 170, "Sy derecha", R_Syr, 3, C_BLACK);
-    fill_rect(14, 120, 170, 1, C_BORDER);
-    draw_text(14, 124, "Para diseno (el menor)", C_NAVY, C_WHITE, 1);
+    int H = CY1 - CY0;
+    char t[24];
+    strcpy(t, "MODULO S ");
+    char u[8]; u_suf(u, 3);
+    str_cat(t, u);
+    card(8, CY0, 184, H, t);
+    int y = CY0 + HDR + 4;
+    row_val(14, y, 172, "Sx sup", R_Sxs, 0, C_BLUE);  y += ROW;
+    row_val(14, y, 172, "Sx inf", R_Sxi, 0, C_BLUE);  y += ROW;
+    row_val(14, y, 172, "Sy izq", R_Syl, 0, C_BLACK); y += ROW;
+    row_val(14, y, 172, "Sy der", R_Syr, 0, C_BLACK); y += ROW;
     double Sx = R_Sxs < R_Sxi ? R_Sxs : R_Sxi;
     double Sy = R_Syl < R_Syr ? R_Syl : R_Syr;
-    row_val(14, 138, 170, "Sx minimo", Sx, 3, C_RED);
-    row_val(14, 154, 170, "Sy minimo", Sy, 3, C_RED);
+    row_val(14, y, 172, "Sx min", Sx, 0, C_RED); y += ROW;
+    row_val(14, y, 172, "Sy min", Sy, 0, C_RED); y += ROW;
+    draw_text(14, y, "min = diseno", C_GRAY, C_WHITE, 1);
 
-    card(196, 25, 180, 146, "MODULO PLASTICO  Z");
-    row_val(202, 46, 168, "Zx", R_Zx, 3, C_BLUE);
-    row_val(202, 64, 168, "Zy", R_Zy, 3, C_BLUE);
-    fill_rect(202, 84, 168, 1, C_BORDER);
-    draw_text(202, 88, "Eje neutro plastico", C_NAVY, C_WHITE, 1);
-    row_val(202, 106, 168, "yp desde base", R_yp - R_y0, 1, C_DGREEN);
-    row_val(202, 124, 168, "xp desde izq.", R_xp - R_x0, 1, C_DGREEN);
-    char s[24];
+    card(196, CY0, 180, H, "PLASTICO");
+    y = CY0 + HDR + 4;
+    row_val(202, y, 168, "Zx", R_Zx, 3, C_BLUE); y += ROW;
+    row_val(202, y, 168, "Zy", R_Zy, 3, C_BLUE); y += ROW;
+    row_val(202, y, 168, "yp base", R_yp - R_y0, 1, C_DGREEN); y += ROW;
+    row_val(202, y, 168, "xp izq", R_xp - R_x0, 1, C_DGREEN);  y += ROW;
+    char s[16];
     fmt_num(s, (Sx > 1e-9) ? R_Zx / Sx : 0.0, 3);
-    row_txt(202, 142, 168, "Factor forma Zx/Sx", s, C_RED);
-    draw_text(10, 175, "S minimo = fibra mas alejada;  Z/S = factor de forma", C_SLATE, C_BG, 1);
+    row_txt(202, y, 168, "Zx/Sx", s, C_RED); y += ROW;
+    fmt_num(s, (Sy > 1e-9) ? R_Zy / Sy : 0.0, 3);
+    row_txt(202, y, 168, "Zy/Sy", s, C_RED); y += ROW;
+    draw_text(202, y, "yp,xp = eje", C_GRAY, C_WHITE, 1);
 }
 
 static void render_tors(void) {
-    card(8, 25, 182, 146, "TORSION (APROXIMADA)");
-    if (R_J > 0.0) row_val(14, 46, 170, "J", R_J, 4, C_BLUE);
-    else row_txt(14, 46, 170, "J", "no disponible", C_GRAY);
+    int H = CY1 - CY0;
+    card(8, CY0, 184, H, "TORSION (aprox.)");
+    int y = CY0 + HDR + 4;
+    if (R_J > 0.0) row_val(14, y, 172, "J", R_J, 4, C_BLUE);
+    else row_txt(14, y, 172, "J", "n/d", C_GRAY);
+    y += ROW;
     if (R_Cw > 0.0) {
-        row_val(14, 64, 170, "Cw", R_Cw, 6, C_BLUE);
-        row_val(14, 82, 170, "ho (entre alas)", h0, 1, C_BLACK);
+        row_val(14, y, 172, "Cw", R_Cw, 6, C_BLUE); y += ROW;
+        row_val(14, y, 172, "ho", h0, 1, C_BLACK);  y += ROW;
     } else {
-        row_txt(14, 64, 170, "Cw", "solo I simetrica", C_GRAY);
+        row_txt(14, y, 172, "Cw", "solo I sim.", C_GRAY); y += ROW;
+        y += ROW;
     }
-    fill_rect(14, 104, 170, 1, C_BORDER);
-    draw_text(14, 108, "J: teoria de pared delgada", C_SLATE, C_WHITE, 1);
-    draw_text(14, 123, "abierta  J = suma b*t^3/3", C_SLATE, C_WHITE, 1);
-    draw_text(14, 138, "cerrada  J = Bredt", C_SLATE, C_WHITE, 1);
-    draw_text(14, 153, "circular J = 2*Ix", C_SLATE, C_WHITE, 1);
+    draw_text(14, y, "J aproximado", C_GRAY, C_WHITE, 1); y += ROW;
+    draw_text(14, y, "abierto b t3/3", C_GRAY, C_WHITE, 1);  y += ROW;
+    draw_text(14, y, "cerrado Bredt", C_GRAY, C_WHITE, 1);   y += ROW;
+    draw_text(14, y, "circular 2 Ix", C_GRAY, C_WHITE, 1);
 
-    card(196, 25, 180, 146, "EJES PRINCIPALES");
+    card(196, CY0, 180, H, "EJES PRINCIP.");
+    y = CY0 + HDR + 4;
     if (R_asim) {
-        row_val(202, 46, 168, "Imax", R_Imax, 4, C_BLUE);
-        row_val(202, 64, 168, "Imin", R_Imin, 4, C_BLUE);
-        char s[24];
+        char s[16];
         fmt_num(s, R_ang, 2);
         str_cat(s, " g");
-        row_txt(202, 82, 168, "Angulo del eje mayor", s, C_RED);
-        draw_text(202, 100, "medido desde x, antihorario", C_SLATE, C_WHITE, 1);
-        fill_rect(202, 118, 168, 1, C_BORDER);
-        row_val(202, 124, 168, "rmin (pandeo)", R_rmin, 1, C_DGREEN);
-        draw_text(202, 146, "Ixy no nulo: revisar pandeo", C_ORANGE, C_WHITE, 1);
-        draw_text(202, 158, "por el eje debil inclinado", C_ORANGE, C_WHITE, 1);
+        row_txt(202, y, 168, "ang", s, C_RED); y += ROW;
+        draw_text(202, y, "desde x, antih", C_GRAY, C_WHITE, 1); y += ROW;
+        row_val(202, y, 168, "rmin", R_rmin, 1, C_DGREEN); y += ROW;
+        y += 4;
+        draw_text(202, y, "Ixy no es 0:", C_ORANGE, C_WHITE, 1); y += ROW;
+        draw_text(202, y, "el eje debil", C_ORANGE, C_WHITE, 1); y += ROW;
+        draw_text(202, y, "inclinado:", C_ORANGE, C_WHITE, 1);  y += ROW;
+        draw_text(202, y, "rmin: pandeo", C_ORANGE, C_WHITE, 1);
     } else {
-        draw_text(202, 48, "Ixy = 0", C_NAVY, C_WHITE, 1);
-        draw_text(202, 66, "Los ejes x e y que pasan", C_SLATE, C_WHITE, 1);
-        draw_text(202, 81, "por el CG ya son los ejes", C_SLATE, C_WHITE, 1);
-        draw_text(202, 96, "principales de la seccion.", C_SLATE, C_WHITE, 1);
-        fill_rect(202, 116, 168, 1, C_BORDER);
-        row_val(202, 124, 168, "Imax = Ix", R_Ix, 4, C_BLUE);
-        row_val(202, 142, 168, "Imin = Iy", R_Iy, 4, C_BLUE);
+        draw_text(202, y, "Ixy = 0", C_NAVY, C_WHITE, 1); y += ROW;
+        y += 4;
+        draw_text(202, y, "Los ejes x,y", C_SLATE, C_WHITE, 1); y += ROW;
+        draw_text(202, y, "en el CG son", C_SLATE, C_WHITE, 1); y += ROW;
+        draw_text(202, y, "los principa-", C_SLATE, C_WHITE, 1); y += ROW;
+        draw_text(202, y, "les:", C_SLATE, C_WHITE, 1); y += ROW;
+        draw_text(202, y, "Imax = Ix", C_BLUE, C_WHITE, 1); y += ROW;
+        draw_text(202, y, "Imin = Iy", C_BLUE, C_WHITE, 1);
     }
-    draw_text(10, 175, "Cw sirve para el pandeo lateral por torsion (AISC)", C_SLATE, C_BG, 1);
 }
 
 static void render_dibujo(void) {
-    card(8, 25, 240, 160, "SECCION A ESCALA");
-    draw_section(10, 41, 236, 142, 1);
+    char t[32], u[8];
+    u_suf(u, 1);
+    strcpy(t, "SECCION A ESCALA (");
+    str_cat(t, u);
+    str_cat(t, ")");
+    card(8, CY0, 368, CY1 - CY0, t);
+    int ytop = CY0 + HDR + 2;
+    int ybot = CY1 - ROW - 4;
+    draw_section(10, ytop, 364, ybot - ytop, 1);
 
-    card(254, 25, 122, 160, "RESUMEN");
-    char s[32], u[8];
-    const char *lb[7] = { "Ag", "xc", "yc", "Ix", "Iy", "Zx", "Zy" };
-    double vv[7] = { R_A, R_xc - R_x0, R_yc - R_y0, R_Ix, R_Iy, R_Zx, R_Zy };
-    int pw[7] = { 2, 1, 1, 4, 4, 3, 3 };
-    int y = 43;
-    for (int i = 0; i < 7; i++) {
-        draw_text(259, y, lb[i], C_BLUE, C_WHITE, 1);
-        fmt_sig(s, vv[i]);
-        u_suf(u, pw[i]);
-        str_cat(s, " ");
-        str_cat(s, u);
-        draw_text(280, y, s, C_BLACK, C_WHITE, 1);
-        y += 14;
-    }
-    fill_rect(259, 143, 110, 1, C_BORDER);
-    fill_rect(259, 152, 11, 1, C_RED);
-    fill_rect(264, 148, 1, 9, C_RED);
-    draw_text(276, 147, "centro de gravedad", C_RED, C_WHITE, 1);
-    dash_h(259, 270, 165, C_GREEN);
-    draw_text(276, 160, "eje neutro plastico", C_DGREEN, C_WHITE, 1);
-    draw_text(259, 172, "[F1] otra seccion", C_SLATE, C_WHITE, 1);
+    int yl = ybot + 4;
+    fill_rect(20, yl + FH / 2, 13, 1, C_RED);
+    fill_rect(26, yl + FH / 2 - 6, 1, 13, C_RED);
+    draw_text(42, yl, "CG", C_RED, C_WHITE, 1);
+    int x2 = 42 + 3 * FW;
+    dash_h(x2, x2 + 22, yl + FH / 2, C_GREEN);
+    draw_text(x2 + 30, yl, "eje neutro plastico", C_DGREEN, C_WHITE, 1);
 }
 
 /* ============================================================
@@ -1089,6 +1166,7 @@ static void render_dibujo(void) {
    ============================================================ */
 int main(void) {
     EnableStatusArea(3);
+    calibrate();
     load_defaults();
     recompute();
 
