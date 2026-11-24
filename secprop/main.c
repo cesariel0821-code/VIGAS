@@ -956,6 +956,29 @@ static void L_note(const char *t, unsigned short c) {
     NL++;
 }
 
+/* barra de desplazamiento al borde derecho de la tarjeta */
+static void scroll_bar(int total, int vis, int sc) {
+    if (total <= vis) return;
+    int tx = 8 + 368 - 13;
+    int ty = CY0 + HDR + 4;
+    int th = vis * ROW - 6;
+    if (th < 24) th = 24;
+    /* riel con borde visible */
+    fill_rect(tx, ty, 9, th, C_LGRAY);
+    draw_rect(tx, ty, 9, th, C_GRAY);
+    /* flechas arriba y abajo */
+    for (int i = 0; i < 4; i++) {
+        fill_rect(tx + 4 - i, ty + 2 + i, 1 + 2 * i, 1, C_SLATE);
+        fill_rect(tx + 4 - i, ty + th - 3 - i, 1 + 2 * i, 1, C_SLATE);
+    }
+    int y0 = ty + 8, h0 = th - 16;
+    if (h0 < 10) return;
+    int hh = h0 * vis / total;
+    if (hh < 8) hh = 8;
+    int oy = (h0 - hh) * sc / (total - vis);
+    fill_rect(tx + 1, y0 + oy, 7, hh, C_BLUE);
+}
+
 static int list_vis(void) {
     int v = (CY1 - CY0 - HDR - 6) / ROW;
     if (v < 1) v = 1;
@@ -979,7 +1002,7 @@ static void draw_list(const char *title) {
 
     card(8, CY0, 368, CY1 - CY0, title);
 
-    int bar = (NL > vis) ? 12 : 0;
+    int bar = (NL > vis) ? 14 : 0;
     int w = 368 - 32 - bar;
     int y = CY0 + HDR + 4;
 
@@ -1004,26 +1027,17 @@ static void draw_list(const char *title) {
         y += ROW;
     }
 
+    scroll_bar(NL, vis, *sc);
     if (NL > vis) {
-        /* barra de desplazamiento + aviso */
-        int tx = 8 + 368 - 11;
-        int ty = CY0 + HDR + 4;
-        int th = vis * ROW - 4;
-        fill_rect(tx, ty, 6, th, C_LGRAY);
-        int hh = th * vis / NL;
-        if (hh < 10) hh = 10;
-        int oy = (th - hh) * (*sc) / (NL - vis);
-        fill_rect(tx, ty + oy, 6, hh, C_BLUE);
         char ind[20], nb[8];
         fmt_num(nb, (double)(*sc + 1), 0);
         strcpy(ind, nb);
         str_cat(ind, "-");
         fmt_num(nb, (double)(*sc + vis), 0);
         str_cat(ind, nb);
-        str_cat(ind, "/");
+        str_cat(ind, " de ");
         fmt_num(nb, (double)NL, 0);
         str_cat(ind, nb);
-        str_cat(ind, "  ^v");
         draw_text(370 - tw_px(ind), CY0 + 2, ind, C_LBLUE, C_SLATE, 1);
     }
 }
@@ -1066,30 +1080,30 @@ static void render_tipo(void) {
     int y = CY0 + HDR + 4;
     for (int i = 0; i < 3; i++) {
         int sel = (i == cur_tipo);
-        unsigned short bg = sel ? C_LBLUE : C_WHITE;
-        fill_rect(11, y - 2, 362, ROW, bg);
-        if (sel) draw_rect(11, y - 2, 362, ROW, C_BLUE);
+        unsigned short bg = sel ? C_BLUE : C_WHITE;
+        unsigned short fl = sel ? C_LBLUE : C_SLATE;
+        fill_rect(11, y - 3, 362, ROW, bg);
         char v[40];
         const char *lb = (i == 0) ? "Perfil" : (i == 1) ? "Filetes" : "Unidad";
-        draw_text(16, y, lb, C_SLATE, bg, 1);
+        draw_text(16, y, lb, fl, bg, 1);
         int vx = 16 + tw_px("Filetes") + 2 * FW;
         if (i == 0) {
             strcpy(v, "< ");
             str_cat(v, SEC[sec_type].name);
             str_cat(v, " >");
-            draw_text_bold(vx, y, v, C_NAVY, bg, 1);
+            draw_text_bold(vx, y, v, sel ? C_WHITE : C_NAVY, bg, 1);
         } else if (i == 1) {
             if (!SEC[sec_type].fil_ok) {
-                draw_text(vx, y, "no aplica", C_GRAY, bg, 1);
+                draw_text(vx, y, "no aplica", sel ? C_LBLUE : C_GRAY, bg, 1);
             } else {
                 strcpy(v, use_fil ? "< SI, con radio r >" : "< NO, arista viva >");
-                draw_text_bold(vx, y, v, use_fil ? C_DGREEN : C_RED, bg, 1);
+                draw_text_bold(vx, y, v, sel ? C_WHITE : (use_fil ? C_DGREEN : C_RED), bg, 1);
             }
         } else {
             strcpy(v, "< ");
             str_cat(v, UN[uidx]);
             str_cat(v, " >");
-            draw_text_bold(vx, y, v, C_NAVY, bg, 1);
+            draw_text_bold(vx, y, v, sel ? C_WHITE : C_NAVY, bg, 1);
         }
         y += ROW;
     }
@@ -1115,34 +1129,28 @@ static void render_datos(void) {
     if (*sc > nd - vis) *sc = nd - vis;
     if (*sc < 0) *sc = 0;
 
-    card(8, CY0, 368, CY1 - CY0, "2. MEDIDAS DEL PERFIL");
-    int bar = (nd > vis) ? 12 : 0;
+    card(8, CY0, 368, CY1 - CY0, "2. MEDIDAS");
+    draw_text(370 - tw_px("^v elegir  EXE editar"), CY0 + 2,
+              "^v elegir  EXE editar", C_LBLUE, C_SLATE, 1);
+    int bar = (nd > vis) ? 14 : 0;
     int y = CY0 + HDR + 4;
     for (int i = *sc; i < nd && i < *sc + vis; i++) {
         int sel = (i == cur_dato);
-        unsigned short bg = sel ? C_LBLUE : C_WHITE;
-        fill_rect(11, y - 2, 362 - bar, ROW, bg);
-        if (sel) draw_rect(11, y - 2, 362 - bar, ROW, C_BLUE);
+        unsigned short bg = sel ? C_BLUE : C_WHITE;
+        fill_rect(11, y - 3, 362 - bar, ROW, bg);
         const char *lbl = (i < s->ndim) ? s->lbl[i] : "r";
         const char *dsc = (i < s->ndim) ? s->dsc[i] : "radio acuerdo";
         char v[24], u[8];
-        draw_text_bold(16, y, lbl, C_BLUE, bg, 1);
-        draw_text(16 + 4 * FW, y, dsc, C_SLATE, bg, 1);
+        draw_text_bold(16, y, lbl, sel ? C_WHITE : C_BLUE, bg, 1);
+        draw_text(16 + 4 * FW, y, dsc, sel ? C_LBLUE : C_SLATE, bg, 1);
         fmt_num(v, dim[i], 2);
         u_suf(u, 1);
         str_cat(v, " ");
         str_cat(v, u);
-        draw_text_bold(366 - bar - tw_px(v), y, v, C_BLACK, bg, 1);
+        draw_text_bold(366 - bar - tw_px(v), y, v, sel ? C_WHITE : C_BLACK, bg, 1);
         y += ROW;
     }
-    if (nd > vis) {
-        int tx = 8 + 368 - 11, ty = CY0 + HDR + 4, th = vis * ROW - 4;
-        fill_rect(tx, ty, 6, th, C_LGRAY);
-        int hh = th * vis / nd;
-        if (hh < 10) hh = 10;
-        int oy = (th - hh) * (*sc) / (nd - vis);
-        fill_rect(tx, ty + oy, 6, hh, C_BLUE);
-    }
+    scroll_bar(nd, vis, *sc);
 }
 
 static char B1[16], B2[16], B3[16];
@@ -1180,7 +1188,7 @@ static void render_flex(void) {
     fmt_num(B2, (Sy > 1e-9) ? R_Zy / Sy : 0.0, 3);
     L_txt("Factor Zx/Sx", B1, C_ORANGE);
     L_txt("Factor Zy/Sy", B2, C_ORANGE);
-    draw_list("FLEXION: MODULOS S y Z");
+    draw_list("FLEXION: S y Z");
 }
 
 static void render_tors(void) {
@@ -1209,7 +1217,7 @@ static void render_tors(void) {
     L_note("J por pared delgada:", C_GRAY);
     L_note("abierta b t3/3, cerrada Bredt,", C_GRAY);
     L_note("circular 2 Ix.", C_GRAY);
-    draw_list("TORSION Y EJES PRINCIPALES");
+    draw_list("TORSION Y EJES PRINC.");
 }
 
 static void render_dibujo(void) {
@@ -1235,6 +1243,61 @@ static void render_dibujo(void) {
 /* ============================================================
    10. Programa principal
    ============================================================ */
+static void handle_key(int key) {
+        if (key == KEY_CTRL_F1) { active_tab = 0; return; }
+    if (key == KEY_CTRL_F2) { active_tab = 1; return; }
+    if (key == KEY_CTRL_F3) { active_tab = 2; return; }
+    if (key == KEY_CTRL_F4) { active_tab = 3; return; }
+    if (key == KEY_CTRL_F5) { active_tab = 4; return; }
+    if (key == KEY_CTRL_F6) { active_tab = 5; return; }
+
+    if (active_tab >= 2 && active_tab <= 4) {
+        if (key == KEY_CTRL_DOWN || key == KEY_CTRL_RIGHT) scr[active_tab]++;
+        else if (key == KEY_CTRL_UP || key == KEY_CTRL_LEFT) scr[active_tab]--;
+        else if (key == KEY_CTRL_EXIT) scr[active_tab] = 0;
+        return;
+    }
+    if (active_tab == 0) {
+        if (key == KEY_CTRL_UP) cur_tipo = (cur_tipo + 2) % 3;
+        else if (key == KEY_CTRL_DOWN) cur_tipo = (cur_tipo + 1) % 3;
+        else if (key == KEY_CTRL_LEFT || key == KEY_CTRL_RIGHT) {
+            int d = (key == KEY_CTRL_RIGHT) ? 1 : -1;
+            if (cur_tipo == 0) {
+                sec_type = (sec_type + S_NTIPOS + d) % S_NTIPOS;
+                use_fil = SEC[sec_type].fil_ok ? 1 : 0;
+                cur_dato = 0;
+                scr[1] = 0; scr[2] = 0; scr[3] = 0; scr[4] = 0;
+                load_defaults();
+                recompute();
+            } else if (cur_tipo == 1) {
+                if (SEC[sec_type].fil_ok) { use_fil = !use_fil; recompute(); }
+            } else {
+                uidx = (uidx + 3 + d) % 3;
+            }
+        } else if (key == KEY_CTRL_EXE) {
+            active_tab = 1;
+        }
+    } else if (active_tab == 1) {
+        const SecDef *s = &SEC[sec_type];
+        int nd = s->ndim + ((s->fil_ok && use_fil) ? 1 : 0);
+        /* Ojo: en la API de Casio la tecla F4 y el digito 1 comparten el
+           codigo 49, asi que aqui NO se abre el editor tecleando numeros:
+           se abre con EXE y dentro de la ventana ya se teclea libremente. */
+        if (key == KEY_CTRL_UP || key == KEY_CTRL_LEFT) cur_dato = (cur_dato + nd - 1) % nd;
+        else if (key == KEY_CTRL_DOWN || key == KEY_CTRL_RIGHT) cur_dato = (cur_dato + 1) % nd;
+        else if (key == KEY_CTRL_EXE) {
+            const char *lbl = (cur_dato < s->ndim) ? s->lbl[cur_dato] : "r";
+            const char *dsc = (cur_dato < s->ndim) ? s->dsc[cur_dato] : "radio de acuerdo";
+            char ttl[40];
+            strcpy(ttl, lbl);
+            str_cat(ttl, " : ");
+            str_cat(ttl, dsc);
+            if (edit_number(ttl, SEC[sec_type].name, UN[uidx], &dim[cur_dato], 0))
+                recompute();
+        }
+    }
+}
+
 int main(void) {
     EnableStatusArea(3);
     calibrate();
@@ -1253,60 +1316,7 @@ int main(void) {
 
         int key = 0;
         GetKey(&key);
-
-        if (key == KEY_CTRL_F1) { active_tab = 0; continue; }
-        if (key == KEY_CTRL_F2) { active_tab = 1; continue; }
-        if (key == KEY_CTRL_F3) { active_tab = 2; continue; }
-        if (key == KEY_CTRL_F4) { active_tab = 3; continue; }
-        if (key == KEY_CTRL_F5) { active_tab = 4; continue; }
-        if (key == KEY_CTRL_F6) { active_tab = 5; continue; }
-
-        if (active_tab >= 2 && active_tab <= 4) {
-            if (key == KEY_CTRL_DOWN) scr[active_tab]++;
-            else if (key == KEY_CTRL_UP) scr[active_tab]--;
-            else if (key == KEY_CTRL_EXIT) scr[active_tab] = 0;
-            continue;
-        }
-        if (active_tab == 0) {
-            if (key == KEY_CTRL_UP) cur_tipo = (cur_tipo + 2) % 3;
-            else if (key == KEY_CTRL_DOWN) cur_tipo = (cur_tipo + 1) % 3;
-            else if (key == KEY_CTRL_LEFT || key == KEY_CTRL_RIGHT) {
-                int d = (key == KEY_CTRL_RIGHT) ? 1 : -1;
-                if (cur_tipo == 0) {
-                    sec_type = (sec_type + S_NTIPOS + d) % S_NTIPOS;
-                    use_fil = SEC[sec_type].fil_ok ? 1 : 0;
-                    cur_dato = 0;
-                    scr[1] = 0; scr[2] = 0; scr[3] = 0; scr[4] = 0;
-                    load_defaults();
-                    recompute();
-                } else if (cur_tipo == 1) {
-                    if (SEC[sec_type].fil_ok) { use_fil = !use_fil; recompute(); }
-                } else {
-                    uidx = (uidx + 3 + d) % 3;
-                }
-            } else if (key == KEY_CTRL_EXE) {
-                active_tab = 1;
-            }
-        } else if (active_tab == 1) {
-            const SecDef *s = &SEC[sec_type];
-            int nd = s->ndim + ((s->fil_ok && use_fil) ? 1 : 0);
-            char typed = 0;
-            if (key >= KEY_CHAR_0 && key <= KEY_CHAR_9) typed = (char)('0' + (key - KEY_CHAR_0));
-            else if (key == KEY_CHAR_DP || key == KEY_CHAR_COMMA) typed = '.';
-
-            if (key == KEY_CTRL_UP) cur_dato = (cur_dato + nd - 1) % nd;
-            else if (key == KEY_CTRL_DOWN) cur_dato = (cur_dato + 1) % nd;
-            else if (key == KEY_CTRL_EXE || typed != 0) {
-                const char *lbl = (cur_dato < s->ndim) ? s->lbl[cur_dato] : "r";
-                const char *dsc = (cur_dato < s->ndim) ? s->dsc[cur_dato] : "radio de acuerdo";
-                char ttl[40];
-                strcpy(ttl, lbl);
-                str_cat(ttl, " : ");
-                str_cat(ttl, dsc);
-                if (edit_number(ttl, SEC[sec_type].name, UN[uidx], &dim[cur_dato], typed))
-                    recompute();
-            }
-        }
+        handle_key(key);
     }
     return 0;
 }
