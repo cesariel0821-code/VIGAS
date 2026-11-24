@@ -76,14 +76,24 @@ jobs:
           }
           EOF
           LDSCRIPT=$(find /tmp/libfxcg -name "prizm.x" | head -n 1)
+          python3 -c '
+          import re
+          p = open("'"$LDSCRIPT"'").read()
+          p = re.sub(r"(\.rodata\s*:\s*\{)", r"\1 . = ALIGN(4); ", p)
+          p = re.sub(r"(\*\(\.rodata\.\*\))", r"\1 . = ALIGN(4); ", p)
+          for sym in ["_mdata", "_sdata", "_edata", "_bbss", "_ebss", "__bss_start", "_end"]:
+              p = p.replace(sym + " =", ". = ALIGN(4); " + sym + " =")
+              p = p.replace(sym + "=", ". = ALIGN(4); " + sym + "=")
+          open("/tmp/prizm_aligned.x", "w").write(p)
+          '
           LIBDIR=$(dirname $(find /tmp/libfxcg -name "libfxcg.a" | head -n 1))
           CRT0_SRC=$(find /tmp/libfxcg -iname "crt0.s" | head -n 1)
           LIBGCC=$(prizm-gcc -m4a-nofpu -mb -print-libgcc-file-name)
           MKG3A=$(find /tmp/mkg3a -type f -name "mkg3a" -executable | head -n 1)
           prizm-gcc -m4a-nofpu -mb -I/tmp/libfxcg/include -c "$CRT0_SRC" -o /tmp/crt0.o
-          prizm-gcc -m4a-nofpu -mb -O2 -fno-builtin -include /tmp/math_shim.h -I/tmp/libfxcg/include -c main.c -o main.o
-          prizm-gcc -m4a-nofpu -mb -O2 -fno-builtin -c /tmp/math_shim.c -o /tmp/math_shim.o
-          prizm-gcc -m4a-nofpu -mb -T"$LDSCRIPT" -Wl,-static -nostdlib /tmp/crt0.o main.o /tmp/math_shim.o -L"$LIBDIR" -Wl,--start-group -lfxcg -lc "$LIBGCC" -Wl,--end-group -o VIGAS.bin
+          prizm-gcc -m4a-nofpu -mb -O2 -falign-functions=4 -fno-builtin -include /tmp/math_shim.h -I/tmp/libfxcg/include -c main.c -o main.o
+          prizm-gcc -m4a-nofpu -mb -O2 -falign-functions=4 -fno-builtin -c /tmp/math_shim.c -o /tmp/math_shim.o
+          prizm-gcc -m4a-nofpu -mb -T/tmp/prizm_aligned.x -Wl,-static -nostdlib /tmp/crt0.o main.o /tmp/math_shim.o -L"$LIBDIR" -Wl,--start-group -lfxcg -lc "$LIBGCC" -Wl,--end-group -o VIGAS.bin
           if head -c 4 VIGAS.bin | grep -q $'\x7fELF'; then
             prizm-objcopy -O binary VIGAS.bin VIGAS_raw.bin
           else
