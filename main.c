@@ -21,6 +21,7 @@ extern void EnableStatusArea(int opt);
 #define C_RED     0xD800
 #define C_LRED    0xFDCB
 #define C_GREEN   0x0480
+#define C_DGREEN  0x0320
 #define C_ORANGE  0xEC00
 
 /* Tipos de viga */
@@ -71,6 +72,7 @@ static int cursor_datos = 0;
 static int cursor_carga = 0;
 static int scroll_carga = 0;
 static int scroll_ecuac = 0;
+static int cursor_nuevo = 0;
 static double diag_cursor_x = 3.0;
 
 /* Utilidades matematicas */
@@ -81,39 +83,37 @@ static double my_round(double x) {
 }
 
 static void fmt_num(char *buf, double val, int dec) {
+    /* buf necesita 32 bytes. Rechaza NaN y valores enormes, y saca las
+       cifras dividiendo entre 10, que es constante: las rutinas de
+       division de enteros con divisor variable del shim de compilacion
+       no respetan la convencion de registros de SH4 y corrompen al
+       que las llama. */
     int idx = 0;
+    if (!(val == val)) { strcpy(buf, "?"); return; }
+    if (!(val > -1e15 && val < 1e15)) { strcpy(buf, "?"); return; }
+    if (dec < 0) dec = 0;
+    if (dec > 6) dec = 6;
     double mult = 1.0;
     for (int i = 0; i < dec; i++) mult *= 10.0;
-    double threshold = 0.5 / mult;
-    if (my_fabs(val) < threshold) val = 0.0;
-    if (val < 0.0) {
-        buf[idx++] = '-';
-        val = -val;
-    }
+    if (my_fabs(val) < 0.5 / mult) val = 0.0;
+    if (val < 0.0) { buf[idx++] = '-'; val = -val; }
     long long scaled = (long long)(val * mult + 0.5);
-    long long imult = (long long)(mult + 0.5);
-    long long ipart = (dec > 0) ? (scaled / imult) : scaled;
-    long long fpart = (dec > 0) ? (scaled % imult) : 0;
-
-    char tmp[24];
+    char fd[8];
+    for (int i = 0; i < dec; i++) {
+        fd[i] = (char)('0' + (int)(scaled % 10));
+        scaled /= 10;
+    }
+    char tmp[32];
     int tlen = 0;
-    if (ipart == 0) {
-        tmp[tlen++] = '0';
-    } else {
-        while (ipart > 0 && tlen < 20) {
-            tmp[tlen++] = (char)('0' + (ipart % 10));
-            ipart /= 10;
-        }
+    if (scaled == 0) tmp[tlen++] = '0';
+    else while (scaled > 0 && tlen < 20) {
+        tmp[tlen++] = (char)('0' + (int)(scaled % 10));
+        scaled /= 10;
     }
     for (int i = tlen - 1; i >= 0; i--) buf[idx++] = tmp[i];
-
     if (dec > 0) {
         buf[idx++] = '.';
-        for (int i = dec - 1; i >= 0; i--) {
-            buf[idx + i] = (char)('0' + (fpart % 10));
-            fpart /= 10;
-        }
-        idx += dec;
+        for (int i = dec - 1; i >= 0; i--) buf[idx++] = fd[i];
     }
     buf[idx] = '\0';
 }
@@ -160,12 +160,23 @@ static void str_cat(char *dst, const char *src) {
 }
 
 /* Primitivas graficas directas a VRAM */
+static unsigned short *VP = 0;
 static unsigned short *vram_ptr(void) {
-    return (unsigned short *)GetVRAMAddress();
+    if (!VP) VP = (unsigned short *)GetVRAMAddress();
+    return VP;
 }
 
 static void fill_rect(int x, int y, int w, int h, unsigned short color) {
     unsigned short *v = vram_ptr();
+    /* recorta antes de sumar: x+w podria desbordar el entero y acabar
+       escribiendo fuera de la memoria de pantalla */
+    if (w <= 0 || h <= 0) return;
+    if (x >= SCREEN_W || y >= SCREEN_H) return;
+    if (x < -SCREEN_W) { w += x + SCREEN_W; x = -SCREEN_W; }
+    if (y < -SCREEN_H) { h += y + SCREEN_H; y = -SCREEN_H; }
+    if (w <= 0 || h <= 0) return;
+    if (w > 2 * SCREEN_W) w = 2 * SCREEN_W;
+    if (h > 2 * SCREEN_H) h = 2 * SCREEN_H;
     int x2 = x + w, y2 = y + h;
     if (x < 0) x = 0;
     if (y < 0) y = 0;
@@ -184,16 +195,25 @@ static void draw_rect(int x, int y, int w, int h, unsigned short color) {
     fill_rect(x + w - 1, y, 1, h, color);
 }
 
+static void put_px(int x, int y, unsigned short c) {
+    if (x < 0 || x >= SCREEN_W || y < 0 || y >= SCREEN_H) return;
+    vram_ptr()[y * SCREEN_W + x] = c;
+}
+
+static unsigned short get_px(int x, int y) {
+    if (x < 0 || x >= SCREEN_W || y < 0 || y >= SCREEN_H) return C_BG;
+    return vram_ptr()[y * SCREEN_W + x];
+}
+
 static void draw_line(int x0, int y0, int x1, int y1, unsigned short color) {
-    unsigned short *v = vram_ptr();
     int dx = x1 > x0 ? (x1 - x0) : (x0 - x1);
     int sx = x0 < x1 ? 1 : -1;
     int dy = y1 > y0 ? (y0 - y1) : (y1 - y0);
     int sy = y0 < y1 ? 1 : -1;
     int err = dx + dy;
-    while (1) {
-        if (x0 >= 0 && x0 < SCREEN_W && y0 >= 0 && y0 < SCREEN_H)
-            v[y0 * SCREEN_W + x0] = color;
+    int guard = 0;
+    while (guard++ < 4000) {
+        put_px(x0, y0, color);
         if (x0 == x1 && y0 == y1) break;
         int e2 = 2 * err;
         if (e2 >= dy) { err += dy; x0 += sx; }
@@ -201,14 +221,139 @@ static void draw_line(int x0, int y0, int x1, int y1, unsigned short color) {
     }
 }
 
+/* ---- metricas reales de la fuente, medidas al arrancar ---- */
+static int FW = 10;
+static int FH = 16;
+static int FOFF = 0;
+static unsigned char CWT[96];
+static int TOPH = 22, TABY = 192, CY0 = 26, CY1 = 188, HDR = 19, ROW = 22;
+
+static int tw_px(const char *s) {
+    int w = 0;
+    for (int i = 0; s[i]; i++) {
+        unsigned char c = (unsigned char)s[i];
+        w += (c >= 32 && c < 127) ? CWT[c - 32] : FW;
+    }
+    return w;
+}
+
 static void draw_text(int x, int y, const char *txt, unsigned short fg, unsigned short bg, int transp) {
-    int px = x, py = y;
+    int px = x, py = y - FOFF;
     PrintMini(&px, &py, txt, transp ? 0x02 : 0x00, 0xFFFFFFFF, 0, 0, fg, bg, 1, 0);
 }
 
 static void draw_text_bold(int x, int y, const char *txt, unsigned short fg, unsigned short bg, int transp) {
     draw_text(x, y, txt, fg, bg, transp);
     draw_text(x + 1, y, txt, fg, bg, 1);
+}
+
+static void calibrate(void) {
+    char buf[2];
+    buf[1] = 0;
+    for (int c = 32; c < 127; c++) {
+        fill_rect(0, 0, SCREEN_W, 60, C_WHITE);
+        buf[0] = (char)c;
+        int x = 0, y = 10;
+        PrintMini(&x, &y, buf, 0x02, 0xFFFFFFFF, 0, 0, C_BLACK, C_WHITE, 1, 0);
+        CWT[c - 32] = (x > 0 && x < 40) ? (unsigned char)x : 10;
+    }
+    FW = CWT['M' - 32];
+    if (FW < 4 || FW > 20) FW = 10;
+    fill_rect(0, 0, SCREEN_W, 60, C_WHITE);
+    int x = 0, y = 10;
+    PrintMini(&x, &y, "AgjQ|_", 0x02, 0xFFFFFFFF, 0, 0, C_BLACK, C_WHITE, 1, 0);
+    int top = -1, bot = -1;
+    for (int py = 0; py < 60; py++) {
+        for (int px = 0; px < SCREEN_W; px++)
+            if (get_px(px, py) != C_WHITE) {
+                if (top < 0) top = py;
+                bot = py;
+                break;
+            }
+    }
+    if (top >= 0 && bot > top && bot - top < 40) {
+        FH = bot - top + 1;
+        FOFF = top - 10;
+    }
+    fill_rect(0, 0, SCREEN_W, 60, C_WHITE);
+    TOPH = FH + 7;
+    TABY = SCREEN_H - (FH + 9);
+    CY0 = TOPH + 4;
+    CY1 = TABY - 4;
+    HDR = FH + 5;
+    ROW = FH + 6;
+}
+
+static void card(int x, int y, int w, int h, const char *title) {
+    fill_rect(x, y, w, h, C_WHITE);
+    draw_rect(x, y, w, h, C_BORDER);
+    fill_rect(x, y, w, HDR, C_SLATE);
+    draw_text(x + 5, y + 1, title, C_WHITE, C_SLATE, 1);
+}
+
+/* barra de desplazamiento al borde derecho */
+static void scroll_bar(int total, int vis, int sc, int ty) {
+    if (total <= vis || vis <= 0) return;
+    int tx = 363;
+    int th = vis * ROW - 6;
+    if (th < 20) th = 20;
+    fill_rect(tx, ty, 9, th, C_LGRAY);
+    draw_rect(tx, ty, 9, th, C_GRAY);
+    int hh = (int)((double)th * (double)vis / (double)total);
+    if (hh < 10) hh = 10;
+    if (hh > th) hh = th;
+    int oy = (int)((double)(th - hh) * (double)sc / (double)(total - vis));
+    if (oy < 0) oy = 0;
+    if (oy > th - hh) oy = th - hh;
+    fill_rect(tx + 1, ty + oy, 7, hh, C_BLUE);
+}
+
+static int list_vis(void) {
+    int h = CY1 - CY0 - HDR - 6;
+    int v = 0;
+    while (v < 20 && (v + 1) * ROW <= h) v++;
+    if (v < 1) v = 1;
+    return v;
+}
+
+/* dibuja un texto partiendolo en varias lineas si no cabe */
+static int draw_wrapped(int x, int y, int w, const char *txt, unsigned short col) {
+    char line[96], word[48], test[160];
+    line[0] = '\0';
+    int i = 0, has = 0, guard = 0;
+    while (txt[i] && guard++ < 40) {
+        while (txt[i] == ' ') i++;
+        if (!txt[i]) break;
+        int wl = 0;
+        while (txt[i] && txt[i] != ' ' && wl < 47) word[wl++] = txt[i++];
+        word[wl] = '\0';
+        strcpy(test, line);
+        if (has) str_cat(test, " ");
+        str_cat(test, word);
+        if (has && tw_px(test) > w) {
+            draw_text_bold(x, y, line, col, C_WHITE, 1);
+            y += ROW;
+            strcpy(line, word);
+        } else {
+            strcpy(line, test);
+        }
+        has = 1;
+    }
+    if (has) {
+        draw_text_bold(x, y, line, col, C_WHITE, 1);
+        y += ROW;
+    }
+    return y;
+}
+
+/* fila etiqueta + valor alineado a la derecha */
+static void row2(int y, int x, int w, const char *lbl, const char *val,
+                 unsigned short cl, unsigned short cv, unsigned short bg) {
+    draw_text(x, y, lbl, cl, bg, 1);
+    int tx = x + w - tw_px(val);
+    int mn = x + tw_px(lbl) + FW;
+    if (tx < mn) tx = mn;
+    draw_text_bold(tx, y, val, cv, bg, 1);
 }
 
 /* Motor de analisis estructural (isostaticas e hiperestaticas) */
@@ -324,7 +469,7 @@ static void solve_beam(void) {
         double deltaL = (h / 3.0) * sum_d;
         double thetaL = (h / 3.0) * sum_t;
         double L2 = L * L, L3 = L2 * L, L4 = L2 * L2;
-        res_RB = (12.0 / L4) * (0.5 * L * thetaL - deltaL);
+        res_RB = (12.0 / L4) * (0.5 * L2 * thetaL - L * deltaL);
         res_MB = (12.0 / L4) * (0.5 * L2 * deltaL - (L3 / 3.0) * thetaL);
         res_RA = V0 - res_RB;
         res_MA = M0 + res_RB * L + res_MB;
@@ -338,14 +483,14 @@ static void eval_VM(double x, double *V_out, double *M_out) {
     double V = V_ext;
     double M = M_ext;
     if (has_supB && x < res_xB - 1e-9) {
-        V += res_RB;
+        V -= res_RB;                     /* dM/dx: la reaccion resta */
         M += res_RB * (res_xB - x);
     }
     if (has_momB && x < res_xB - 1e-9) {
         M += res_MB;
     }
     if (has_supA && x < res_xA - 1e-9) {
-        V += res_RA;
+        V -= res_RA;                     /* dM/dx: la reaccion resta */
         M += res_RA * (res_xA - x);
     }
     if (has_momA && x < res_xA - 1e-9) {
@@ -356,90 +501,75 @@ static void eval_VM(double x, double *V_out, double *M_out) {
 }
 
 /* Editor numerico interactivo con soporte inmediato de teclado */
-static int edit_number(const char *title, const char *unit, double *target, int allow_neg, char first_char) {
-    char buf[20];
-    int len = 0;
-
-    if (first_char != 0) {
-        if (first_char == '-' && !allow_neg) return 0;
-        buf[0] = first_char;
-        buf[1] = '\0';
-        len = 1;
-    } else {
-        fmt_num(buf, *target, 2);
-        len = (int)strlen(buf);
-    }
+static int edit_number(const char *title, const char *unit, double *target, int allow_neg) {
+    char buf[32];
+    fmt_num(buf, *target, 2);
+    int len = (int)strlen(buf);
 
     while (1) {
-        /* Ventana modal centrada */
-        int bx = 36, by = 46, bw = 312, bh = 112;
+        int bw = 352, bh = HDR + 6 * ROW;
+        if (bh > 150) bh = 150;
+        int bx = 16, by = (SCREEN_H - bh) / 2;
         fill_rect(bx + 3, by + 3, bw, bh, C_GRAY);
         fill_rect(bx, by, bw, bh, C_WHITE);
         draw_rect(bx, by, bw, bh, C_NAVY);
-        fill_rect(bx, by, bw, 22, C_NAVY);
-        draw_text_bold(bx + 8, by + 4, title, C_WHITE, C_NAVY, 1);
+        fill_rect(bx, by, bw, HDR, C_NAVY);
+        draw_text_bold(bx + 8, by + 2, title, C_WHITE, C_NAVY, 1);
 
-        /* Caja de entrada */
-        fill_rect(bx + 14, by + 34, bw - 28, 28, C_LBLUE);
-        draw_rect(bx + 14, by + 34, bw - 28, 28, C_BLUE);
-
-        char disp[28];
+        int y = by + HDR + 6;
+        fill_rect(bx + 12, y, bw - 24, ROW + 4, C_LBLUE);
+        draw_rect(bx + 12, y, bw - 24, ROW + 4, C_BLUE);
+        char disp[48];
         strcpy(disp, buf);
         str_cat(disp, "_");
-        draw_text_bold(bx + 22, by + 40, disp, C_BLACK, C_LBLUE, 1);
-        draw_text(bx + bw - 48, by + 40, unit, C_NAVY, C_LBLUE, 1);
+        draw_text_bold(bx + 20, y + 3, disp, C_BLACK, C_LBLUE, 1);
+        draw_text(bx + bw - 24 - tw_px(unit), y + 3, unit, C_NAVY, C_LBLUE, 1);
 
-        draw_text(bx + 14, by + 72, "[0-9 . -] Escribir   [DEL] Borrar", C_SLATE, C_WHITE, 1);
-        draw_text(bx + 14, by + 89, "[EXE] Confirmar      [EXIT] Cancelar", C_BLUE, C_WHITE, 1);
-
+        y += ROW + 10;
+        draw_text(bx + 14, y, "0-9 . escribe   DEL borra", C_SLATE, C_WHITE, 1);
+        y += ROW;
+        if (allow_neg) draw_text(bx + 14, y, "(-) cambia el signo", C_SLATE, C_WHITE, 1);
+        y += ROW;
+        draw_text(bx + 14, y, "EXE acepta   EXIT cancela", C_BLUE, C_WHITE, 1);
         Bdisp_PutDisp_DD();
 
         int key = 0;
         GetKey(&key);
 
         if (key == KEY_CTRL_EXE) {
-            double val;
-            if (parse_num(buf, &val)) {
-                if (!allow_neg && val < 0.0) val = -val;
-                *target = val;
+            double v;
+            if (parse_num(buf, &v)) {
+                if (!allow_neg && v < 0.0) v = -v;
+                if (!(v == v)) v = 0.0;
+                if (v > 1e9) v = 1e9;
+                if (v < -1e9) v = -1e9;
+                *target = v;
                 return 1;
             }
         } else if (key == KEY_CTRL_EXIT) {
             return 0;
         } else if (key == KEY_CTRL_DEL) {
-            if (len > 0) {
-                len--;
-                buf[len] = '\0';
-            }
+            if (len > 0) { len--; buf[len] = '\0'; }
         } else if (key == KEY_CTRL_AC) {
-            len = 0;
-            buf[0] = '\0';
+            len = 0; buf[0] = '\0';
         } else if (key >= KEY_CHAR_0 && key <= KEY_CHAR_9) {
-            if (len < 14) {
-                buf[len++] = (char)('0' + (key - KEY_CHAR_0));
-                buf[len] = '\0';
-            }
+            if (len < 12) { buf[len++] = (char)('0' + (key - KEY_CHAR_0)); buf[len] = '\0'; }
         } else if (key == KEY_CHAR_DP || key == KEY_CHAR_COMMA) {
-            int has_dot = 0;
-            for (int i = 0; i < len; i++) if (buf[i] == '.') has_dot = 1;
-            if (!has_dot && len < 14) {
+            int hd = 0;
+            for (int i = 0; i < len; i++) if (buf[i] == '.') hd = 1;
+            if (!hd && len < 12) {
                 if (len == 0) buf[len++] = '0';
-                buf[len++] = '.';
-                buf[len] = '\0';
+                buf[len++] = '.'; buf[len] = '\0';
             }
-        } else if (key == 0x87 || key == KEY_CHAR_MINUS || key == '-') {
-            if (allow_neg) {
-                if (len == 0) {
-                    buf[len++] = '-';
-                    buf[len] = '\0';
-                } else if (buf[0] == '-') {
-                    for (int i = 0; i < len; i++) buf[i] = buf[i + 1];
-                    len--;
-                } else if (len < 14) {
-                    for (int i = len; i >= 0; i--) buf[i + 1] = buf[i];
-                    buf[0] = '-';
-                    len++;
-                }
+        } else if (allow_neg && (key == 0x87 || key == KEY_CHAR_MINUS || key == '-')) {
+            if (len == 0) { buf[len++] = '-'; buf[len] = '\0'; }
+            else if (buf[0] == '-') {
+                for (int i = 0; i < len; i++) buf[i] = buf[i + 1];
+                len--;
+            } else if (len < 12) {
+                for (int i = len; i >= 0; i--) buf[i + 1] = buf[i];
+                buf[0] = '-';
+                len++;
             }
         }
     }
@@ -528,16 +658,22 @@ static void draw_beam_schematic(int x0, int y_beam, int width, int show_reaction
     }
 
     if (show_reactions) {
-        char rb[20], num[14];
+        char rb[32], num[24];
         if (has_supA) {
             fmt_num(num, res_RA, 2);
             strcpy(rb, "RA="); str_cat(rb, num);
-            draw_text(pxA - 12, y_beam + 16, rb, C_GREEN, C_WHITE, 1);
+            int tx = pxA - tw_px(rb) / 2;
+            if (tx < 10) tx = 10;
+            if (tx + tw_px(rb) > SCREEN_W - 6) tx = SCREEN_W - 6 - tw_px(rb);
+            draw_text(tx, y_beam + 15, rb, C_DGREEN, C_WHITE, 1);
         }
         if (has_supB) {
             fmt_num(num, res_RB, 2);
             strcpy(rb, "RB="); str_cat(rb, num);
-            draw_text(pxB - 38, y_beam + 16, rb, C_GREEN, C_WHITE, 1);
+            int tx = pxB - tw_px(rb) / 2;
+            if (tx < 10) tx = 10;
+            if (tx + tw_px(rb) > SCREEN_W - 6) tx = SCREEN_W - 6 - tw_px(rb);
+            draw_text(tx, y_beam + 15, rb, C_DGREEN, C_WHITE, 1);
         }
     }
 }
@@ -546,109 +682,100 @@ static void draw_beam_schematic(int x0, int y_beam, int width, int show_reaction
 static void draw_chrome(void) {
     fill_rect(0, 0, SCREEN_W, SCREEN_H, C_BG);
 
-    /* Barra superior */
-    fill_rect(0, 0, SCREEN_W, 21, C_NAVY);
-    draw_text_bold(8, 3, "VIGAS PRO", C_WHITE, C_NAVY, 1);
-
-    char info[36], num[14];
+    fill_rect(0, 0, SCREEN_W, TOPH, C_NAVY);
+    draw_text_bold(8, 4, "VIGAS", C_WHITE, C_NAVY, 1);
+    char info[48], num[24];
     fmt_num(num, beam_L, 2);
     strcpy(info, "L=");
     str_cat(info, num);
-    str_cat(info, "m | Cargas:");
+    str_cat(info, " m   ");
     fmt_num(num, (double)num_loads, 0);
     str_cat(info, num);
-    draw_text(215, 3, info, C_LBLUE, C_NAVY, 1);
+    str_cat(info, " cargas");
+    draw_text(SCREEN_W - 8 - tw_px(info), 4, info, C_LBLUE, C_NAVY, 1);
 
-    /* Menu inferior F1 - F6 */
-    const char *tabs[6] = {"DATOS", "CARGA", "REACC", "V y M", "ECUAC", "NUEVO"};
-    int y_bar = 192;
-    fill_rect(0, y_bar - 1, SCREEN_W, 1, C_BLACK);
+    const char *tabs[6] = { "DATOS", "CARGA", "REACC", "V y M", "ECUAC", "NUEVO" };
+    fill_rect(0, TABY - 1, SCREEN_W, 1, C_SLATE);
     for (int i = 0; i < 6; i++) {
         int x = i * 64;
         int w = (i == 5) ? (SCREEN_W - x) : 64;
-        int active = (i == active_tab);
-        unsigned short bg = active ? C_BLUE : C_SLATE;
-        unsigned short fg = C_WHITE;
-        fill_rect(x, y_bar, w, SCREEN_H - y_bar, bg);
-        if (i > 0) fill_rect(x, y_bar, 1, SCREEN_H - y_bar, C_BLACK);
-        if (active) {
-            fill_rect(x + 2, y_bar + 1, w - 4, 2, C_LBLUE);
-            draw_text_bold(x + 8, y_bar + 5, tabs[i], fg, bg, 1);
-        } else {
-            draw_text(x + 9, y_bar + 5, tabs[i], fg, bg, 1);
-        }
+        int act = (i == active_tab);
+        unsigned short bg = act ? C_BLUE : C_LGRAY;
+        unsigned short fg = act ? C_WHITE : C_SLATE;
+        fill_rect(x, TABY, w, SCREEN_H - TABY, bg);
+        if (i > 0) fill_rect(x, TABY, 1, SCREEN_H - TABY, C_GRAY);
+        char lb[8];
+        strcpy(lb, tabs[i]);
+        while (lb[0] && tw_px(lb) > w - 2) lb[strlen(lb) - 1] = '\0';
+        int tx = x + (w - tw_px(lb)) / 2;
+        if (tx < x + 1) tx = x + 1;
+        draw_text(tx, TABY + 5, lb, fg, bg, 1);
     }
 }
 
 static const char *beam_type_name(int t) {
     switch (t) {
-        case BEAM_SIMPLE:     return "Simple (Artic-Rodillo)";
-        case BEAM_OVERHANG:   return "Con Voladizos (xA, xB)";
-        case BEAM_CANT_L:     return "Voladizo Izq (Empot. A)";
-        case BEAM_CANT_R:     return "Voladizo Der (Empot. B)";
-        case BEAM_FIXED_BOTH: return "Doble Empotrada (Hiper)";
-        case BEAM_PROP_L:     return "Empot-Artic (Hiper)";
+        case BEAM_SIMPLE:     return "Simple";
+        case BEAM_OVERHANG:   return "Con voladizos";
+        case BEAM_CANT_L:     return "Empotrada en A";
+        case BEAM_CANT_R:     return "Empotrada en B";
+        case BEAM_FIXED_BOTH: return "Doble empotrada";
+        case BEAM_PROP_L:     return "Empot.-articulada";
         default:              return "Simple";
     }
 }
 
 /* Pantalla 1 (F1): INGRESO DE DATOS */
 static void render_tab_datos(void) {
-    /* Tarjeta esquema */
-    fill_rect(8, 25, SCREEN_W - 16, 62, C_WHITE);
-    draw_rect(8, 25, SCREEN_W - 16, 62, C_BORDER);
-    draw_text(14, 28, "1. CONFIGURACION DE LA VIGA", C_NAVY, C_WHITE, 1);
-    draw_beam_schematic(44, 62, 296, 0);
+    int n = (beam_type == BEAM_OVERHANG) ? 5 : 3;
+    if (cursor_datos >= n) cursor_datos = n - 1;
+    if (cursor_datos < 0) cursor_datos = 0;
 
-    /* Filas editables */
-    int max_items = (beam_type == BEAM_OVERHANG) ? 5 : 3;
-    if (cursor_datos >= max_items) cursor_datos = max_items - 1;
+    int ch = HDR + 6 + n * ROW;
+    if (CY0 + ch > CY1) ch = CY1 - CY0;
+    card(8, CY0, 368, ch, "1. LA VIGA");
+    draw_text(370 - tw_px("^v elegir  EXE cambiar"), CY0 + 1,
+              "^v elegir  EXE cambiar", C_LBLUE, C_SLATE, 1);
 
-    int y = 92;
-    int row_h = (beam_type == BEAM_OVERHANG) ? 18 : 24;
-
-    for (int idx = 0; idx < max_items; idx++) {
-        int sel = (idx == cursor_datos);
-        unsigned short rbg = sel ? C_LBLUE : C_WHITE;
-        unsigned short rbd = sel ? C_BLUE : C_BORDER;
-        fill_rect(8, y, SCREEN_W - 16, row_h - 2, rbg);
-        draw_rect(8, y, SCREEN_W - 16, row_h - 2, rbd);
-
-        char val_str[36], num[16];
-        int ty = y + (row_h - 16) / 2;
-
-        if (idx == 0) {
-            draw_text_bold(14, ty, "Longitud Viga (L):", C_BLACK, rbg, 1);
+    int y = CY0 + HDR + 4;
+    char v[48], num[24];
+    for (int i = 0; i < n; i++) {
+        int sel = (i == cursor_datos);
+        unsigned short bg = sel ? C_BLUE : C_WHITE;
+        unsigned short cl = sel ? C_LBLUE : C_SLATE;
+        unsigned short cv = sel ? C_WHITE : C_BLUE;
+        fill_rect(11, y - 3, 362, ROW, bg);
+        if (i == 0) {
             fmt_num(num, beam_L, 2);
-            strcpy(val_str, num); str_cat(val_str, " m");
-            draw_text_bold(220, ty, val_str, C_BLUE, rbg, 1);
-        } else if (idx == 1) {
-            draw_text_bold(14, ty, "Tipo de Apoyo:", C_BLACK, rbg, 1);
-            strcpy(val_str, "< ");
-            str_cat(val_str, beam_type_name(beam_type));
-            str_cat(val_str, " >");
-            draw_text(158, ty, val_str, C_NAVY, rbg, 1);
-        } else if (beam_type == BEAM_OVERHANG && idx == 2) {
-            draw_text_bold(14, ty, "Pos. Apoyo A (xA):", C_BLACK, rbg, 1);
+            strcpy(v, num); str_cat(v, " m");
+            row2(y, 16, 352, "Longitud L", v, cl, cv, bg);
+        } else if (i == 1) {
+            strcpy(v, "< ");
+            str_cat(v, beam_type_name(beam_type));
+            str_cat(v, " >");
+            row2(y, 16, 352, "Apoyos", v, cl, sel ? C_WHITE : C_NAVY, bg);
+        } else if (beam_type == BEAM_OVERHANG && i == 2) {
             fmt_num(num, sup_xA, 2);
-            strcpy(val_str, num); str_cat(val_str, " m");
-            draw_text_bold(220, ty, val_str, C_BLUE, rbg, 1);
-        } else if (beam_type == BEAM_OVERHANG && idx == 3) {
-            draw_text_bold(14, ty, "Pos. Apoyo B (xB):", C_BLACK, rbg, 1);
+            strcpy(v, num); str_cat(v, " m");
+            row2(y, 16, 352, "Apoyo A en xA", v, cl, cv, bg);
+        } else if (beam_type == BEAM_OVERHANG && i == 3) {
             fmt_num(num, sup_xB, 2);
-            strcpy(val_str, num); str_cat(val_str, " m");
-            draw_text_bold(220, ty, val_str, C_BLUE, rbg, 1);
+            strcpy(v, num); str_cat(v, " m");
+            row2(y, 16, 352, "Apoyo B en xB", v, cl, cv, bg);
         } else {
-            draw_text_bold(14, ty, "Cargas Aplicadas:", C_BLACK, rbg, 1);
             fmt_num(num, (double)num_loads, 0);
-            strcpy(val_str, num);
-            str_cat(val_str, " cargas -> [F2 / EXE]");
-            draw_text_bold(185, ty, val_str, C_GREEN, rbg, 1);
+            strcpy(v, num); 
+            row2(y, 16, 352, "Cargas", v, cl, sel ? C_WHITE : C_DGREEN, bg);
         }
-        y += row_h;
+        y += ROW;
     }
 
-    draw_text(10, 174, "[0-9] Escribir valor   [</>] Apoyo   [F2] Cargas", C_SLATE, C_BG, 1);
+    int y2 = CY0 + ch + 5;
+    if (CY1 - y2 > 44) {
+        fill_rect(8, y2, 368, CY1 - y2, C_WHITE);
+        draw_rect(8, y2, 368, CY1 - y2, C_BORDER);
+        draw_beam_schematic(50, y2 + (CY1 - y2) / 2, 284, 0);
+    }
 }
 
 /* Formulario para agregar o editar una carga */
@@ -666,22 +793,22 @@ static void add_or_edit_load(int load_type, int edit_idx) {
     }
 
     if (load_type == LOAD_POINT) {
-        if (!edit_number("CARGA PUNTUAL P (+abajo)", "kN", &tmp.val1, 1, 0)) return;
-        if (!edit_number("POSICION x DE LA CARGA", "m", &tmp.pos1, 0, 0)) return;
+        if (!edit_number("CARGA PUNTUAL P (+abajo)", "kN", &tmp.val1, 1)) return;
+        if (!edit_number("POSICION x DE LA CARGA", "m", &tmp.pos1, 0)) return;
         if (tmp.pos1 > beam_L) tmp.pos1 = beam_L;
     } else if (load_type == LOAD_DIST) {
-        if (!edit_number("CARGA DISTRIB. INICIO w1", "kN/m", &tmp.val1, 1, 0)) return;
-        if (!edit_number("CARGA DISTRIB. FIN w2", "kN/m", &tmp.val2, 1, 0)) return;
-        if (!edit_number("POSICION INICIAL x1", "m", &tmp.pos1, 0, 0)) return;
-        if (!edit_number("POSICION FINAL x2", "m", &tmp.pos2, 0, 0)) return;
+        if (!edit_number("CARGA DISTRIB. INICIO w1", "kN/m", &tmp.val1, 1)) return;
+        if (!edit_number("CARGA DISTRIB. FIN w2", "kN/m", &tmp.val2, 1)) return;
+        if (!edit_number("POSICION INICIAL x1", "m", &tmp.pos1, 0)) return;
+        if (!edit_number("POSICION FINAL x2", "m", &tmp.pos2, 0)) return;
         if (tmp.pos1 > beam_L) tmp.pos1 = beam_L;
         if (tmp.pos2 > beam_L) tmp.pos2 = beam_L;
         if (tmp.pos2 < tmp.pos1) {
             double sw = tmp.pos1; tmp.pos1 = tmp.pos2; tmp.pos2 = sw;
         }
     } else if (load_type == LOAD_MOMENT) {
-        if (!edit_number("MOMENTO PUNTUAL M (+hor)", "kNm", &tmp.val1, 1, 0)) return;
-        if (!edit_number("POSICION x DEL MOMENTO", "m", &tmp.pos1, 0, 0)) return;
+        if (!edit_number("MOMENTO PUNTUAL M (+hor)", "kNm", &tmp.val1, 1)) return;
+        if (!edit_number("POSICION x DEL MOMENTO", "m", &tmp.pos1, 0)) return;
         if (tmp.pos1 > beam_L) tmp.pos1 = beam_L;
     }
 
@@ -695,107 +822,109 @@ static void add_or_edit_load(int load_type, int edit_idx) {
 
 /* Pantalla 2 (F2): CARGAS */
 static void render_tab_carga(void) {
-    int total_rows = 3 + num_loads;
-    if (cursor_carga >= total_rows) cursor_carga = total_rows - 1;
+    int total = 3 + num_loads;
+    if (cursor_carga >= total) cursor_carga = total - 1;
     if (cursor_carga < 0) cursor_carga = 0;
 
-    int vis = 7;
+    int vis = list_vis();
     if (cursor_carga < scroll_carga) scroll_carga = cursor_carga;
     if (cursor_carga >= scroll_carga + vis) scroll_carga = cursor_carga - vis + 1;
+    if (scroll_carga > total - vis) scroll_carga = total - vis;
+    if (scroll_carga < 0) scroll_carga = 0;
 
-    int y = 25;
-    for (int r = scroll_carga; r < scroll_carga + vis && r < total_rows; r++) {
+    card(8, CY0, 368, CY1 - CY0, "2. CARGAS");
+    draw_text(370 - tw_px("EXE anade/edita  DEL borra"), CY0 + 1,
+              "EXE anade/edita  DEL borra", C_LBLUE, C_SLATE, 1);
+
+    int bar = (total > vis) ? 14 : 0;
+    int y = CY0 + HDR + 4;
+    for (int r = scroll_carga; r < scroll_carga + vis && r < total; r++) {
         int sel = (r == cursor_carga);
-        unsigned short rbg = sel ? C_LBLUE : C_WHITE;
-        unsigned short rbd = sel ? C_BLUE : C_BORDER;
-        fill_rect(8, y, SCREEN_W - 16, 19, rbg);
-        draw_rect(8, y, SCREEN_W - 16, 19, rbd);
-
-        if (r == 0) {
-            draw_text_bold(14, y + 2, "+ Agregar Carga Puntual (P)", C_RED, rbg, 1);
-        } else if (r == 1) {
-            draw_text_bold(14, y + 2, "+ Agregar Carga Distribuida (w)", C_ORANGE, rbg, 1);
-        } else if (r == 2) {
-            draw_text_bold(14, y + 2, "+ Agregar Momento Puntual (M)", C_GREEN, rbg, 1);
+        unsigned short bg = sel ? C_BLUE : C_WHITE;
+        fill_rect(11, y - 3, 362 - bar, ROW, bg);
+        char line[64], n1[24], n2[24];
+        if (r < 3) {
+            const char *t = (r == 0) ? "+ Carga puntual  P"
+                          : (r == 1) ? "+ Carga distribuida  w"
+                                     : "+ Momento puntual  M";
+            unsigned short c = sel ? C_WHITE : (r == 0 ? C_RED : (r == 1 ? C_ORANGE : C_DGREEN));
+            draw_text_bold(16, y, t, c, bg, 1);
         } else {
-            int idx = r - 3;
-            Load *ld = &loads[idx];
-            char line[56], n1[12], n2[12], n3[12];
-            fmt_num(n1, (double)(idx + 1), 0);
-            strcpy(line, "#"); str_cat(line, n1);
+            Load *ld = &loads[r - 3];
+            fmt_num(n1, (double)(r - 2), 0);
+            strcpy(line, "#"); str_cat(line, n1); str_cat(line, " ");
             if (ld->type == LOAD_POINT) {
                 fmt_num(n1, ld->val1, 2);
                 fmt_num(n2, ld->pos1, 2);
-                str_cat(line, " Puntual P="); str_cat(line, n1);
-                str_cat(line, "kN  x="); str_cat(line, n2); str_cat(line, "m");
-                draw_text(14, y + 2, line, C_BLACK, rbg, 1);
+                str_cat(line, "P="); str_cat(line, n1); str_cat(line, " kN");
+                str_cat(line, "  x="); str_cat(line, n2); str_cat(line, " m");
             } else if (ld->type == LOAD_DIST) {
                 fmt_num(n1, ld->val1, 1);
                 fmt_num(n2, ld->val2, 1);
-                fmt_num(n3, ld->pos1, 1);
-                str_cat(line, " Dist w="); str_cat(line, n1);
-                str_cat(line, "->"); str_cat(line, n2);
-                str_cat(line, " ["); str_cat(line, n3);
-                fmt_num(n3, ld->pos2, 1);
-                str_cat(line, "-"); str_cat(line, n3); str_cat(line, "m]");
-                draw_text(14, y + 2, line, C_BLACK, rbg, 1);
+                str_cat(line, "w="); str_cat(line, n1);
+                str_cat(line, ">"); str_cat(line, n2);
+                fmt_num(n1, ld->pos1, 1);
+                fmt_num(n2, ld->pos2, 1);
+                str_cat(line, " ["); str_cat(line, n1);
+                str_cat(line, "-"); str_cat(line, n2); str_cat(line, "]");
             } else {
                 fmt_num(n1, ld->val1, 2);
                 fmt_num(n2, ld->pos1, 2);
-                str_cat(line, " Momento M="); str_cat(line, n1);
-                str_cat(line, "kNm  x="); str_cat(line, n2); str_cat(line, "m");
-                draw_text(14, y + 2, line, C_BLACK, rbg, 1);
+                str_cat(line, "M="); str_cat(line, n1); str_cat(line, " kNm");
+                str_cat(line, "  x="); str_cat(line, n2);
             }
+            draw_text(16, y, line, sel ? C_WHITE : C_BLACK, bg, 1);
         }
-        y += 21;
+        y += ROW;
     }
-
-    draw_text(10, 174, "[EXE] Agregar/Editar   [DEL] Borrar   [F3] Reacciones", C_SLATE, C_BG, 1);
+    scroll_bar(total, vis, scroll_carga, CY0 + HDR + 4);
 }
 
 /* Pantalla 3 (F3): REACCIONES */
 static void render_tab_reacc(void) {
-    fill_rect(8, 25, SCREEN_W - 16, 74, C_WHITE);
-    draw_rect(8, 25, SCREEN_W - 16, 74, C_BORDER);
-    draw_text_bold(14, 28, "DIAGRAMA DE CUERPO LIBRE", C_NAVY, C_WHITE, 1);
-    draw_beam_schematic(46, 64, 292, 1);
+    int nf = (has_supA ? 1 : 0) + (has_supB ? 1 : 0) + (has_momA ? 1 : 0) + (has_momB ? 1 : 0);
+    int hf = HDR + 6 + (nf > 0 ? nf : 1) * ROW;
+    int hs = CY1 - CY0 - hf - 5;
+    if (hs < 40) { hs = 40; hf = CY1 - CY0 - hs - 5; }
 
-    fill_rect(8, 104, SCREEN_W - 16, 82, C_WHITE);
-    draw_rect(8, 104, SCREEN_W - 16, 82, C_BORDER);
+    fill_rect(8, CY0, 368, hs, C_WHITE);
+    draw_rect(8, CY0, 368, hs, C_BORDER);
+    draw_text(14, CY0 + 2, "cuerpo libre", C_GRAY, C_WHITE, 1);
+    draw_beam_schematic(50, CY0 + hs / 2, 284, 1);
 
-    char line[48], num[16];
-    int y = 110;
-
+    card(8, CY0 + hs + 5, 368, hf, "3. REACCIONES");
+    int y = CY0 + hs + 5 + HDR + 4;
+    char v[48], num[24];
+    if (nf == 0) {
+        draw_text(16, y, "Sin apoyos definidos.", C_GRAY, C_WHITE, 1);
+        return;
+    }
     if (has_supA) {
-        fmt_num(num, res_RA, 3);
-        strcpy(line, "Reaccion Vertical RA = ");
-        str_cat(line, num); str_cat(line, " kN");
-        draw_text_bold(16, y, line, C_BLUE, C_WHITE, 1);
-        y += 18;
+        fmt_num(num, res_RA, 2);
+        strcpy(v, num); str_cat(v, " kN");
+        row2(y, 16, 352, "Reaccion RA", v, C_SLATE, C_BLUE, C_WHITE);
+        y += ROW;
     }
     if (has_supB) {
-        fmt_num(num, res_RB, 3);
-        strcpy(line, "Reaccion Vertical RB = ");
-        str_cat(line, num); str_cat(line, " kN");
-        draw_text_bold(16, y, line, C_BLUE, C_WHITE, 1);
-        y += 18;
+        fmt_num(num, res_RB, 2);
+        strcpy(v, num); str_cat(v, " kN");
+        row2(y, 16, 352, "Reaccion RB", v, C_SLATE, C_BLUE, C_WHITE);
+        y += ROW;
     }
     if (has_momA) {
-        fmt_num(num, -res_MA, 3);
-        strcpy(line, "Momento Empotram. MA = ");
-        str_cat(line, num); str_cat(line, " kN*m");
-        draw_text_bold(16, y, line, C_RED, C_WHITE, 1);
-        y += 18;
+        fmt_num(num, -res_MA, 2);
+        strcpy(v, num); str_cat(v, " kNm");
+        row2(y, 16, 352, "Momento MA", v, C_SLATE, C_RED, C_WHITE);
+        y += ROW;
     }
     if (has_momB) {
-        fmt_num(num, res_MB, 3);
-        strcpy(line, "Momento Empotram. MB = ");
-        str_cat(line, num); str_cat(line, " kN*m");
-        draw_text_bold(16, y, line, C_RED, C_WHITE, 1);
+        fmt_num(num, res_MB, 2);
+        strcpy(v, num); str_cat(v, " kNm");
+        row2(y, 16, 352, "Momento MB", v, C_SLATE, C_RED, C_WHITE);
     }
 }
 
-/* Pantalla 4 (F4): DIAGRAMAS V(x) Y M(x) CON CURSOR */
+/* Pantalla 4 (F4): DIAGRAMAS V(x) y M(x) con cursor */
 static void render_tab_vm(void) {
     double L = beam_L > 0.01 ? beam_L : 1.0;
     int N = 120;
@@ -803,99 +932,94 @@ static void render_tab_vm(void) {
     double vmax = 0.0, vmin = 0.0, mmax = 0.0, mmin = 0.0;
 
     for (int i = 0; i <= N; i++) {
-        double x = (L * i) / N;
+        double x = (L * (double)i) / (double)N;
         eval_VM(x, &V_arr[i], &M_arr[i]);
         if (V_arr[i] > vmax) vmax = V_arr[i];
         if (V_arr[i] < vmin) vmin = V_arr[i];
         if (M_arr[i] > mmax) mmax = M_arr[i];
         if (M_arr[i] < mmin) mmin = M_arr[i];
     }
-
     double vabs = my_fabs(vmax) > my_fabs(vmin) ? my_fabs(vmax) : my_fabs(vmin);
     double mabs = my_fabs(mmax) > my_fabs(mmin) ? my_fabs(mmax) : my_fabs(mmin);
     if (vabs < 1e-6) vabs = 1.0;
     if (mabs < 1e-6) mabs = 1.0;
 
-    int x0 = 16, w = 244;
+    /* dos graficos arriba, dos lineas de datos abajo */
+    int hinfo = 2 * ROW + 6;
+    int hg = (CY1 - CY0 - hinfo - 4) / 2;
+    if (hg < 30) hg = 30;
+    int x0 = 16, w = 344;
 
-    /* Grafico Cortante V(x) */
-    fill_rect(8, 24, 260, 78, C_WHITE);
-    draw_rect(8, 24, 260, 78, C_BORDER);
-    int yv0 = 63;
-    draw_line(x0, yv0, x0 + w, yv0, C_GRAY);
-    draw_text_bold(12, 26, "V(x)", C_BLUE, C_WHITE, 1);
-
+    int ytopV = CY0, ycV = CY0 + hg / 2;
+    fill_rect(8, ytopV, 368, hg, C_WHITE);
+    draw_rect(8, ytopV, 368, hg, C_BORDER);
+    draw_line(x0, ycV, x0 + w, ycV, C_GRAY);
+    int amp = hg / 2 - 4;
     for (int i = 0; i < N; i++) {
-        int px1 = x0 + (i * w) / N;
-        int px2 = x0 + ((i + 1) * w) / N;
-        int py1 = yv0 - (int)my_round((V_arr[i] / vabs) * 30.0);
-        int py2 = yv0 - (int)my_round((V_arr[i + 1] / vabs) * 30.0);
-        draw_line(px1, yv0, px1, py1, C_LBLUE);
+        int px1 = x0 + (int)(((double)i * (double)w) / (double)N);
+        int px2 = x0 + (int)(((double)(i + 1) * (double)w) / (double)N);
+        int py1 = ycV - (int)my_round((V_arr[i] / vabs) * (double)amp);
+        int py2 = ycV - (int)my_round((V_arr[i + 1] / vabs) * (double)amp);
+        draw_line(px1, ycV, px1, py1, C_LBLUE);
         draw_line(px1, py1, px2, py2, C_BLUE);
     }
+    draw_text_bold(12, ytopV + 2, "V(x)", C_BLUE, C_WHITE, 1);
 
-    /* Grafico Momento M(x) */
-    fill_rect(8, 105, 260, 82, C_WHITE);
-    draw_rect(8, 105, 260, 82, C_BORDER);
-    int ym0 = 146;
-    draw_line(x0, ym0, x0 + w, ym0, C_GRAY);
-    draw_text_bold(12, 107, "M(x)", C_RED, C_WHITE, 1);
-
+    int ytopM = CY0 + hg + 4, ycM = ytopM + hg / 2;
+    fill_rect(8, ytopM, 368, hg, C_WHITE);
+    draw_rect(8, ytopM, 368, hg, C_BORDER);
+    draw_line(x0, ycM, x0 + w, ycM, C_GRAY);
     for (int i = 0; i < N; i++) {
-        int px1 = x0 + (i * w) / N;
-        int px2 = x0 + ((i + 1) * w) / N;
-        int py1 = ym0 - (int)my_round((M_arr[i] / mabs) * 32.0);
-        int py2 = ym0 - (int)my_round((M_arr[i + 1] / mabs) * 32.0);
-        draw_line(px1, ym0, px1, py1, C_LRED);
+        int px1 = x0 + (int)(((double)i * (double)w) / (double)N);
+        int px2 = x0 + (int)(((double)(i + 1) * (double)w) / (double)N);
+        int py1 = ycM - (int)my_round((M_arr[i] / mabs) * (double)amp);
+        int py2 = ycM - (int)my_round((M_arr[i + 1] / mabs) * (double)amp);
+        draw_line(px1, ycM, px1, py1, C_LRED);
         draw_line(px1, py1, px2, py2, C_RED);
     }
+    draw_text_bold(12, ytopM + 2, "M(x)", C_RED, C_WHITE, 1);
 
-    /* Linea de cursor interactivo */
-    int cx = x0 + (int)my_round((diag_cursor_x / L) * w);
-    draw_line(cx, 26, cx, 185, C_GREEN);
-
-    /* Panel derecho con valores */
-    fill_rect(272, 24, 104, 163, C_WHITE);
-    draw_rect(272, 24, 104, 163, C_BORDER);
+    /* cursor */
+    int cx = x0 + (int)my_round((diag_cursor_x / L) * (double)w);
+    draw_line(cx, ytopV + 1, cx, ytopM + hg - 2, C_DGREEN);
 
     double vc, mc;
     eval_VM(diag_cursor_x, &vc, &mc);
-    char buf[24], num[14];
+    char line[80], num[24];
+    int yi = ytopM + hg + 4;
+    fill_rect(8, yi, 368, hinfo, C_WHITE);
+    draw_rect(8, yi, 368, hinfo, C_BORDER);
 
-    draw_text_bold(277, 28, "CURSOR [</>]", C_GREEN, C_WHITE, 1);
+    /* los valores se colocan uno tras otro midiendo el texto, para que
+       un numero largo nunca se salga de la tarjeta */
+    int cxx = 14;
     fmt_num(num, diag_cursor_x, 2);
-    strcpy(buf, "x="); str_cat(buf, num); str_cat(buf, "m");
-    draw_text(277, 43, buf, C_BLACK, C_WHITE, 1);
-
+    strcpy(line, "<> x="); str_cat(line, num); str_cat(line, " m");
+    draw_text_bold(cxx, yi + 3, line, C_DGREEN, C_WHITE, 1);
+    cxx += tw_px(line) + 2 * FW;
     fmt_num(num, vc, 2);
-    strcpy(buf, "V="); str_cat(buf, num);
-    draw_text(277, 57, buf, C_BLUE, C_WHITE, 1);
-
+    strcpy(line, "V="); str_cat(line, num);
+    if (cxx + tw_px(line) < 370) { draw_text_bold(cxx, yi + 3, line, C_BLUE, C_WHITE, 1); cxx += tw_px(line) + 2 * FW; }
     fmt_num(num, mc, 2);
-    strcpy(buf, "M="); str_cat(buf, num);
-    draw_text(277, 71, buf, C_RED, C_WHITE, 1);
+    strcpy(line, "M="); str_cat(line, num);
+    if (cxx + tw_px(line) < 370) draw_text_bold(cxx, yi + 3, line, C_RED, C_WHITE, 1);
 
-    draw_line(276, 88, 372, 88, C_BORDER);
-    draw_text_bold(277, 92, "EXTREMOS", C_NAVY, C_WHITE, 1);
-
-    fmt_num(num, vmax, 1);
-    strcpy(buf, "V+:"); str_cat(buf, num);
-    draw_text(277, 107, buf, C_BLUE, C_WHITE, 1);
-
-    fmt_num(num, vmin, 1);
-    strcpy(buf, "V-:"); str_cat(buf, num);
-    draw_text(277, 121, buf, C_BLUE, C_WHITE, 1);
-
-    fmt_num(num, mmax, 1);
-    strcpy(buf, "M+:"); str_cat(buf, num);
-    draw_text(277, 137, buf, C_RED, C_WHITE, 1);
-
-    fmt_num(num, mmin, 1);
-    strcpy(buf, "M-:"); str_cat(buf, num);
-    draw_text(277, 151, buf, C_RED, C_WHITE, 1);
+    const char *enm[4] = { "V+", "V-", "M+", "M-" };
+    double ev[4] = { vmax, vmin, mmax, mmin };
+    unsigned short ec[4] = { C_BLUE, C_BLUE, C_RED, C_RED };
+    cxx = 14;
+    for (int i = 0; i < 4; i++) {
+        fmt_num(num, ev[i], (my_fabs(ev[i]) < 100.0) ? 1 : 0);
+        strcpy(line, enm[i]);
+        str_cat(line, " ");
+        str_cat(line, num);
+        if (cxx + tw_px(line) > 368) break;
+        draw_text(cxx, yi + 3 + ROW, line, ec[i], C_WHITE, 1);
+        cxx += tw_px(line) + FW + FW / 2;
+    }
 }
 
-/* Pantalla 5 (F5): ECUACIONES POR TRAMOS */
+/* Pantalla 5 (F5): ECUACIONES POR TRAMOS, un tramo por pagina */
 static void render_tab_ecuac(void) {
     double pts[40];
     int np = 0;
@@ -903,105 +1027,216 @@ static void render_tab_ecuac(void) {
     pts[np++] = beam_L;
     if (has_supA) pts[np++] = res_xA;
     if (has_supB) pts[np++] = res_xB;
-    for (int i = 0; i < num_loads; i++) {
+    for (int i = 0; i < num_loads && np < 36; i++) {
         pts[np++] = loads[i].pos1;
         if (loads[i].type == LOAD_DIST) pts[np++] = loads[i].pos2;
     }
-    /* Ordenar y eliminar duplicados */
-    for (int i = 0; i < np - 1; i++) {
-        for (int j = i + 1; j < np; j++) {
-            if (pts[j] < pts[i]) {
-                double t = pts[i]; pts[i] = pts[j]; pts[j] = t;
-            }
-        }
-    }
+    for (int i = 0; i < np - 1; i++)
+        for (int j = i + 1; j < np; j++)
+            if (pts[j] < pts[i]) { double t = pts[i]; pts[i] = pts[j]; pts[j] = t; }
     double uniq[40];
     int nu = 0;
-    for (int i = 0; i < np; i++) {
+    for (int i = 0; i < np; i++)
         if (nu == 0 || pts[i] - uniq[nu - 1] > 1e-4) uniq[nu++] = pts[i];
-    }
 
-    int n_tramos = nu - 1;
-    if (n_tramos < 1) n_tramos = 1;
-    if (scroll_ecuac >= n_tramos) scroll_ecuac = n_tramos - 1;
+    int nt = nu - 1;
+    if (nt < 1) nt = 1;
+    if (scroll_ecuac >= nt) scroll_ecuac = nt - 1;
     if (scroll_ecuac < 0) scroll_ecuac = 0;
 
-    int y = 25;
-    for (int t = scroll_ecuac; t < scroll_ecuac + 3 && t < n_tramos; t++) {
-        double xa = uniq[t], xb = uniq[t + 1];
-        double xm = 0.5 * (xa + xb);
-        double d = xb - xa;
+    char hdr[48], n1[24], n2[24];
+    fmt_num(n1, (double)(scroll_ecuac + 1), 0);
+    fmt_num(n2, (double)nt, 0);
+    strcpy(hdr, "5. TRAMO "); str_cat(hdr, n1);
+    str_cat(hdr, " de "); str_cat(hdr, n2);
+    card(8, CY0, 368, CY1 - CY0, hdr);
+    if (nt > 1) draw_text(370 - tw_px("^v otro tramo"), CY0 + 1,
+                          "^v otro tramo", C_LBLUE, C_SLATE, 1);
 
-        /* Obtener coeficientes exactos de V(x) = c0 + c1*(x-xa) + c2*(x-xa)^2 */
-        double v0, m0, v1, m1, v2, m2;
-        eval_VM(xa + 1e-5 * d, &v0, &m0);
-        eval_VM(xm, &v1, &m1);
-        eval_VM(xb - 1e-5 * d, &v2, &m2);
-
-        double slope_V = (v2 - v0) / d;
-
-        fill_rect(8, y, SCREEN_W - 16, 48, C_WHITE);
-        draw_rect(8, y, SCREEN_W - 16, 48, C_BORDER);
-
-        char hdr[48], n1[12], n2[12];
-        fmt_num(n1, (double)(t + 1), 0);
-        fmt_num(n2, xa, 2);
-        strcpy(hdr, "TRAMO "); str_cat(hdr, n1);
-        str_cat(hdr, ":  "); str_cat(hdr, n2);
-        fmt_num(n2, xb, 2);
-        str_cat(hdr, " <= x <= "); str_cat(hdr, n2); str_cat(hdr, " m");
-        draw_text_bold(14, y + 3, hdr, C_NAVY, C_WHITE, 1);
-
-        char eqV[56], eqM[56];
-        fmt_num(n1, v0, 2);
-        strcpy(eqV, "V(x) = "); str_cat(eqV, n1);
-        if (my_fabs(slope_V) > 1e-3) {
-            fmt_num(n2, slope_V, 2);
-            if (slope_V >= 0) str_cat(eqV, " + ");
-            else str_cat(eqV, " ");
-            str_cat(eqV, n2);
-            str_cat(eqV, "(x-");
-            fmt_num(n1, xa, 2); str_cat(eqV, n1); str_cat(eqV, ")");
-        }
-        draw_text(14, y + 18, eqV, C_BLUE, C_WHITE, 1);
-
-        fmt_num(n1, m0, 2);
-        strcpy(eqM, "M(x) = "); str_cat(eqM, n1);
-        if (my_fabs(v0) > 1e-3) {
-            fmt_num(n2, v0, 2);
-            if (v0 >= 0) str_cat(eqM, " + ");
-            else str_cat(eqM, " ");
-            str_cat(eqM, n2);
-            str_cat(eqM, "(x-");
-            fmt_num(n1, xa, 2); str_cat(eqM, n1); str_cat(eqM, ")");
-        }
-        if (my_fabs(slope_V) > 1e-3) {
-            fmt_num(n2, 0.5 * slope_V, 2);
-            if (slope_V >= 0) str_cat(eqM, " + ");
-            else str_cat(eqM, " ");
-            str_cat(eqM, n2);
-            str_cat(eqM, "(x-");
-            fmt_num(n1, xa, 2); str_cat(eqM, n1); str_cat(eqM, ")^2");
-        }
-        draw_text(14, y + 32, eqM, C_RED, C_WHITE, 1);
-
-        y += 51;
+    if (nu < 2) {
+        draw_text(16, CY0 + HDR + 6, "Define la viga y sus cargas.", C_GRAY, C_WHITE, 1);
+        return;
     }
-    draw_text(10, 178, "[▲/▼] Desplazar tramos", C_SLATE, C_BG, 1);
+
+    double xa = uniq[scroll_ecuac], xb = uniq[scroll_ecuac + 1];
+    double d = xb - xa;
+    if (d < 1e-9) d = 1e-9;
+    double v0, m0, v1, m1, v2, m2;
+    eval_VM(xa + 1e-5 * d, &v0, &m0);
+    eval_VM(0.5 * (xa + xb), &v1, &m1);
+    eval_VM(xb - 1e-5 * d, &v2, &m2);
+    double sv = (v2 - v0) / d;
+
+    int y = CY0 + HDR + 6;
+    char ln[80];
+    fmt_num(n1, xa, 2);
+    fmt_num(n2, xb, 2);
+    strcpy(ln, n1); str_cat(ln, " <= x <= "); str_cat(ln, n2); str_cat(ln, " m");
+    draw_text_bold(16, y, ln, C_NAVY, C_WHITE, 1);
+    y += ROW + 4;
+
+    fmt_num(n1, v0, 2);
+    strcpy(ln, "V = "); str_cat(ln, n1);
+    if (my_fabs(sv) > 1e-3) {
+        fmt_num(n2, sv, 2);
+        str_cat(ln, (sv >= 0) ? " + " : " ");
+        str_cat(ln, n2); str_cat(ln, " u");
+    }
+    y = draw_wrapped(16, y, 340, ln, C_BLUE);
+
+    fmt_num(n1, m0, 2);
+    strcpy(ln, "M = "); str_cat(ln, n1);
+    if (my_fabs(v0) > 1e-3) {
+        fmt_num(n2, v0, 2);
+        str_cat(ln, (v0 >= 0) ? " + " : " ");
+        str_cat(ln, n2); str_cat(ln, " u");
+    }
+    if (my_fabs(sv) > 1e-3) {
+        fmt_num(n2, 0.5 * sv, 2);
+        str_cat(ln, (sv >= 0) ? " + " : " ");
+        str_cat(ln, n2); str_cat(ln, " u2");
+    }
+    y = draw_wrapped(16, y, 340, ln, C_RED);
+    y += 4;
+
+    fmt_num(n1, xa, 2);
+    strcpy(ln, "con  u = x - "); str_cat(ln, n1);
+    if (y + FH < CY1) {
+        draw_text(16, y, ln, C_SLATE, C_WHITE, 1);
+        y += ROW;
+    }
+    if (y + FH < CY1)
+        draw_text(16, y, "u2 es u al cuadrado", C_GRAY, C_WHITE, 1);
 }
 
 /* Pantalla 6 (F6): NUEVO / EJEMPLO */
 static void render_tab_nuevo(void) {
-    fill_rect(24, 42, SCREEN_W - 48, 128, C_WHITE);
-    draw_rect(24, 42, SCREEN_W - 48, 128, C_NAVY);
-    draw_text_bold(38, 52, "OPCIONES DE PROYECTO", C_NAVY, C_WHITE, 1);
-    draw_text(38, 76, "Presiona [1]: Limpiar todo (viga nueva)", C_BLACK, C_WHITE, 1);
-    draw_text(38, 98, "Presiona [2]: Cargar viga de ejemplo", C_BLUE, C_WHITE, 1);
-    draw_text(38, 120, "Presiona [F1]: Volver a Ingreso de Datos", C_SLATE, C_WHITE, 1);
+    card(8, CY0, 368, HDR + 8 + 2 * ROW, "6. PROYECTO");
+    int y = CY0 + HDR + 4;
+    for (int i = 0; i < 2; i++) {
+        int sel = (i == cursor_nuevo);
+        unsigned short bg = sel ? C_BLUE : C_WHITE;
+        fill_rect(11, y - 3, 362, ROW, bg);
+        draw_text_bold(16, y, i == 0 ? "Viga nueva (borra todo)"
+                                     : "Cargar viga de ejemplo",
+                       sel ? C_WHITE : (i == 0 ? C_RED : C_BLUE), bg, 1);
+        y += ROW;
+    }
+    int y2 = CY0 + HDR + 8 + 2 * ROW + 5;
+    if (CY1 - y2 > ROW + 8) {
+        fill_rect(8, y2, 368, CY1 - y2, C_WHITE);
+        draw_rect(8, y2, 368, CY1 - y2, C_BORDER);
+        draw_text(16, y2 + 5, "^v elegir y EXE para aplicar", C_SLATE, C_WHITE, 1);
+    }
+}
+
+static void handle_key(int key) {
+    if (key == KEY_CTRL_F1) { active_tab = 0; return; }
+    if (key == KEY_CTRL_F2) { active_tab = 1; return; }
+    if (key == KEY_CTRL_F3) { active_tab = 2; solve_beam(); return; }
+    if (key == KEY_CTRL_F4) { active_tab = 3; solve_beam(); return; }
+    if (key == KEY_CTRL_F5) { active_tab = 4; solve_beam(); return; }
+    if (key == KEY_CTRL_F6) { active_tab = 5; return; }
+
+    /* Sin % ni / de enteros con divisor variable: las rutinas del shim
+       no respetan la convencion de registros de SH4. */
+    if (active_tab == 0) {
+        int n = (beam_type == BEAM_OVERHANG) ? 5 : 3;
+        if (key == KEY_CTRL_UP) { cursor_datos--; if (cursor_datos < 0) cursor_datos = n - 1; }
+        else if (key == KEY_CTRL_DOWN) { cursor_datos++; if (cursor_datos >= n) cursor_datos = 0; }
+        else if (cursor_datos == 1 && (key == KEY_CTRL_LEFT || key == KEY_CTRL_RIGHT || key == KEY_CTRL_EXE)) {
+            if (key == KEY_CTRL_LEFT) { beam_type--; if (beam_type < 0) beam_type = 5; }
+            else { beam_type++; if (beam_type > 5) beam_type = 0; }
+            if (beam_type == BEAM_OVERHANG) { sup_xA = 0.0; sup_xB = beam_L; }
+            solve_beam();
+        } else if (key == KEY_CTRL_EXE) {
+            if (cursor_datos == 0) {
+                if (edit_number("LONGITUD DE LA VIGA  L", "m", &beam_L, 0)) {
+                    if (beam_L < 0.1) beam_L = 0.1;
+                    if (sup_xB > beam_L) sup_xB = beam_L;
+                    if (diag_cursor_x > beam_L) diag_cursor_x = beam_L;
+                    solve_beam();
+                }
+            } else if (beam_type == BEAM_OVERHANG && cursor_datos == 2) {
+                if (edit_number("APOYO A: POSICION xA", "m", &sup_xA, 0)) {
+                    if (sup_xA > beam_L) sup_xA = beam_L;
+                    solve_beam();
+                }
+            } else if (beam_type == BEAM_OVERHANG && cursor_datos == 3) {
+                if (edit_number("APOYO B: POSICION xB", "m", &sup_xB, 0)) {
+                    if (sup_xB > beam_L) sup_xB = beam_L;
+                    solve_beam();
+                }
+            } else if (cursor_datos == n - 1) {
+                active_tab = 1;
+            }
+        }
+    } else if (active_tab == 1) {
+        int total = 3 + num_loads;
+        if (key == KEY_CTRL_UP) { cursor_carga--; if (cursor_carga < 0) cursor_carga = total - 1; }
+        else if (key == KEY_CTRL_DOWN) { cursor_carga++; if (cursor_carga >= total) cursor_carga = 0; }
+        else if (key == KEY_CTRL_EXE) {
+            if (cursor_carga == 0) add_or_edit_load(LOAD_POINT, -1);
+            else if (cursor_carga == 1) add_or_edit_load(LOAD_DIST, -1);
+            else if (cursor_carga == 2) add_or_edit_load(LOAD_MOMENT, -1);
+            else add_or_edit_load(0, cursor_carga - 3);
+        } else if (key == KEY_CTRL_DEL && cursor_carga >= 3) {
+            int idx = cursor_carga - 3;
+            for (int i = idx; i < num_loads - 1; i++) loads[i] = loads[i + 1];
+            num_loads--;
+            if (cursor_carga >= 3 + num_loads) cursor_carga = 3 + num_loads - 1;
+            if (cursor_carga < 0) cursor_carga = 0;
+            solve_beam();
+        }
+    } else if (active_tab == 3) {
+        double step = beam_L * 0.025;
+        if (step < 1e-6) step = 1e-6;
+        if (key == KEY_CTRL_LEFT) {
+            diag_cursor_x -= step;
+            if (diag_cursor_x < 0.0) diag_cursor_x = 0.0;
+        } else if (key == KEY_CTRL_RIGHT) {
+            diag_cursor_x += step;
+            if (diag_cursor_x > beam_L) diag_cursor_x = beam_L;
+        }
+    } else if (active_tab == 4) {
+        if (key == KEY_CTRL_UP) scroll_ecuac--;
+        else if (key == KEY_CTRL_DOWN) scroll_ecuac++;
+        else if (key == KEY_CTRL_EXIT) scroll_ecuac = 0;
+    } else if (active_tab == 5) {
+        if (key == KEY_CTRL_UP) { cursor_nuevo--; if (cursor_nuevo < 0) cursor_nuevo = 1; }
+        else if (key == KEY_CTRL_DOWN) { cursor_nuevo++; if (cursor_nuevo > 1) cursor_nuevo = 0; }
+        else if (key == KEY_CTRL_EXE) {
+            if (cursor_nuevo == 0) {
+                beam_L = 6.0;
+                beam_type = BEAM_SIMPLE;
+                num_loads = 0;
+                cursor_datos = 0;
+                cursor_carga = 0;
+                scroll_carga = 0;
+                scroll_ecuac = 0;
+                diag_cursor_x = 3.0;
+                active_tab = 0;
+                solve_beam();
+            } else {
+                beam_L = 8.0;
+                beam_type = BEAM_SIMPLE;
+                num_loads = 2;
+                loads[0].type = LOAD_DIST; loads[0].val1 = 12.0; loads[0].val2 = 12.0; loads[0].pos1 = 0.0; loads[0].pos2 = 5.0;
+                loads[1].type = LOAD_POINT; loads[1].val1 = 25.0; loads[1].val2 = 0.0; loads[1].pos1 = 6.5; loads[1].pos2 = 0.0;
+                diag_cursor_x = 4.0;
+                cursor_carga = 0;
+                scroll_carga = 0;
+                scroll_ecuac = 0;
+                active_tab = 0;
+                solve_beam();
+            }
+        }
+    }
 }
 
 int main(void) {
     EnableStatusArea(3);
+    calibrate();
     solve_beam();
 
     while (1) {
@@ -1011,109 +1246,12 @@ int main(void) {
         else if (active_tab == 2) render_tab_reacc();
         else if (active_tab == 3) render_tab_vm();
         else if (active_tab == 4) render_tab_ecuac();
-        else if (active_tab == 5) render_tab_nuevo();
-
+        else render_tab_nuevo();
         Bdisp_PutDisp_DD();
 
         int key = 0;
         GetKey(&key);
-
-        /* Atajos globales del menu inferior F1 - F6 */
-        if (key == KEY_CTRL_F1) { active_tab = 0; continue; }
-        if (key == KEY_CTRL_F2) { active_tab = 1; continue; }
-        if (key == KEY_CTRL_F3) { active_tab = 2; solve_beam(); continue; }
-        if (key == KEY_CTRL_F4) { active_tab = 3; solve_beam(); continue; }
-        if (key == KEY_CTRL_F5) { active_tab = 4; solve_beam(); continue; }
-        if (key == KEY_CTRL_F6) { active_tab = 5; continue; }
-
-        /* Controles por pestana */
-        if (active_tab == 0) {
-            int max_items = (beam_type == BEAM_OVERHANG) ? 5 : 3;
-            char typed = 0;
-            if (key >= KEY_CHAR_0 && key <= KEY_CHAR_9) typed = (char)('0' + (key - KEY_CHAR_0));
-            else if (key == KEY_CHAR_DP || key == KEY_CHAR_COMMA) typed = '.';
-
-            if (key == KEY_CTRL_UP) {
-                cursor_datos = (cursor_datos + max_items - 1) % max_items;
-            } else if (key == KEY_CTRL_DOWN) {
-                cursor_datos = (cursor_datos + 1) % max_items;
-            } else if (cursor_datos == 1 && (key == KEY_CTRL_LEFT || key == KEY_CTRL_RIGHT || key == KEY_CTRL_EXE)) {
-                if (key == KEY_CTRL_LEFT) beam_type = (beam_type + 5) % 6;
-                else beam_type = (beam_type + 1) % 6;
-                if (beam_type == BEAM_OVERHANG) {
-                    sup_xA = 0.0;
-                    sup_xB = beam_L;
-                }
-                solve_beam();
-            } else if (key == KEY_CTRL_EXE || typed != 0) {
-                if (cursor_datos == 0) {
-                    if (edit_number("LONGITUD DE LA VIGA (L)", "m", &beam_L, 0, typed)) {
-                        if (beam_L < 0.1) beam_L = 0.1;
-                        if (sup_xB > beam_L) sup_xB = beam_L;
-                        solve_beam();
-                    }
-                } else if (beam_type == BEAM_OVERHANG && cursor_datos == 2) {
-                    if (edit_number("POSICION APOYO A (xA)", "m", &sup_xA, 0, typed)) {
-                        if (sup_xA > beam_L) sup_xA = beam_L;
-                        solve_beam();
-                    }
-                } else if (beam_type == BEAM_OVERHANG && cursor_datos == 3) {
-                    if (edit_number("POSICION APOYO B (xB)", "m", &sup_xB, 0, typed)) {
-                        if (sup_xB > beam_L) sup_xB = beam_L;
-                        solve_beam();
-                    }
-                } else if (cursor_datos == max_items - 1) {
-                    active_tab = 1;
-                }
-            }
-        } else if (active_tab == 1) {
-            int total_rows = 3 + num_loads;
-            if (key == KEY_CTRL_UP) {
-                cursor_carga = (cursor_carga + total_rows - 1) % total_rows;
-            } else if (key == KEY_CTRL_DOWN) {
-                cursor_carga = (cursor_carga + 1) % total_rows;
-            } else if (key == KEY_CTRL_EXE) {
-                if (cursor_carga == 0) add_or_edit_load(LOAD_POINT, -1);
-                else if (cursor_carga == 1) add_or_edit_load(LOAD_DIST, -1);
-                else if (cursor_carga == 2) add_or_edit_load(LOAD_MOMENT, -1);
-                else add_or_edit_load(0, cursor_carga - 3);
-            } else if (key == KEY_CTRL_DEL && cursor_carga >= 3) {
-                int idx = cursor_carga - 3;
-                for (int i = idx; i < num_loads - 1; i++) loads[i] = loads[i + 1];
-                num_loads--;
-                solve_beam();
-            }
-        } else if (active_tab == 3) {
-            double step = beam_L / 40.0;
-            if (key == KEY_CTRL_LEFT) {
-                diag_cursor_x -= step;
-                if (diag_cursor_x < 0.0) diag_cursor_x = 0.0;
-            } else if (key == KEY_CTRL_RIGHT) {
-                diag_cursor_x += step;
-                if (diag_cursor_x > beam_L) diag_cursor_x = beam_L;
-            }
-        } else if (active_tab == 4) {
-            if (key == KEY_CTRL_UP) scroll_ecuac--;
-            else if (key == KEY_CTRL_DOWN) scroll_ecuac++;
-        } else if (active_tab == 5) {
-            if (key == KEY_CHAR_1) {
-                beam_L = 6.0;
-                beam_type = BEAM_SIMPLE;
-                num_loads = 0;
-                cursor_datos = 0;
-                active_tab = 0;
-                solve_beam();
-            } else if (key == KEY_CHAR_2) {
-                beam_L = 8.0;
-                beam_type = BEAM_SIMPLE;
-                num_loads = 2;
-                loads[0].type = LOAD_DIST; loads[0].val1 = 12.0; loads[0].val2 = 12.0; loads[0].pos1 = 0.0; loads[0].pos2 = 5.0;
-                loads[1].type = LOAD_POINT; loads[1].val1 = 25.0; loads[1].val2 = 0.0; loads[1].pos1 = 6.5; loads[1].pos2 = 0.0;
-                diag_cursor_x = 4.0;
-                active_tab = 0;
-                solve_beam();
-            }
-        }
+        handle_key(key);
     }
     return 0;
 }
