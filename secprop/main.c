@@ -97,22 +97,27 @@ static void fmt_num(char *buf, double val, int dec) {
     if (dec > 6) dec = 6;
     double mult = 1.0;
     for (int i = 0; i < dec; i++) mult *= 10.0;
-    double threshold = 0.5 / mult;
-    if (my_fabs(val) < threshold) val = 0.0;
+    if (my_fabs(val) < 0.5 / mult) val = 0.0;
     if (val < 0.0) { buf[idx++] = '-'; val = -val; }
     long long scaled = (long long)(val * mult + 0.5);
-    long long imult = (long long)(mult + 0.5);
-    long long ipart = (dec > 0) ? (scaled / imult) : scaled;
-    long long fpart = (dec > 0) ? (scaled % imult) : 0;
+    /* las cifras se sacan dividiendo entre 10, que es constante: el
+       compilador no llama a la rutina de division del shim */
+    char fd[8];
+    for (int i = 0; i < dec; i++) {
+        fd[i] = (char)('0' + (int)(scaled % 10));
+        scaled /= 10;
+    }
     char tmp[32];
     int tlen = 0;
-    if (ipart == 0) tmp[tlen++] = '0';
-    else while (ipart > 0 && tlen < 20) { tmp[tlen++] = (char)('0' + (ipart % 10)); ipart /= 10; }
+    if (scaled == 0) tmp[tlen++] = '0';
+    else while (scaled > 0 && tlen < 20) {
+        tmp[tlen++] = (char)('0' + (int)(scaled % 10));
+        scaled /= 10;
+    }
     for (int i = tlen - 1; i >= 0; i--) buf[idx++] = tmp[i];
     if (dec > 0) {
         buf[idx++] = '.';
-        for (int i = dec - 1; i >= 0; i--) { buf[idx + i] = (char)('0' + (fpart % 10)); fpart /= 10; }
-        idx += dec;
+        for (int i = dec - 1; i >= 0; i--) buf[idx++] = fd[i];
     }
     buf[idx] = '\0';
 }
@@ -948,17 +953,22 @@ static void scroll_bar(int total, int vis, int sc) {
     if (th < 20) th = 20;
     fill_rect(tx, ty, 9, th, C_LGRAY);
     draw_rect(tx, ty, 9, th, C_GRAY);
-    int hh = th * vis / total;
+    int hh = (int)((double)th * (double)vis / (double)total);
     if (hh < 10) hh = 10;
     if (hh > th) hh = th;
-    int oy = (th - hh) * sc / (total - vis);
+    int oy = (int)((double)(th - hh) * (double)sc / (double)(total - vis));
     if (oy < 0) oy = 0;
     if (oy > th - hh) oy = th - hh;
     fill_rect(tx + 1, ty + oy, 7, hh, C_BLUE);
 }
 
+/* Sin divisiones de enteros con divisor variable: en esta cadena de
+   compilacion las rutinas __sdivsi3_i4i / __udivsi3_i4i del shim no
+   respetan la convencion de registros de SH4 y corrompen al llamante. */
 static int list_vis(void) {
-    int v = (CY1 - CY0 - HDR - 6) / ROW;
+    int h = CY1 - CY0 - HDR - 6;
+    int v = 0;
+    while (v < 20 && (v + 1) * ROW <= h) v++;
     if (v < 1) v = 1;
     return v;
 }
@@ -1249,12 +1259,14 @@ static void handle_key(int key) {
         return;
     }
     if (active_tab == 0) {
-        if (key == KEY_CTRL_UP) cur_tipo = (cur_tipo + 2) % 3;
-        else if (key == KEY_CTRL_DOWN) cur_tipo = (cur_tipo + 1) % 3;
+        if (key == KEY_CTRL_UP) { cur_tipo--; if (cur_tipo < 0) cur_tipo = 2; }
+        else if (key == KEY_CTRL_DOWN) { cur_tipo++; if (cur_tipo > 2) cur_tipo = 0; }
         else if (key == KEY_CTRL_LEFT || key == KEY_CTRL_RIGHT) {
             int d = (key == KEY_CTRL_RIGHT) ? 1 : -1;
             if (cur_tipo == 0) {
-                sec_type = (sec_type + S_NTIPOS + d) % S_NTIPOS;
+                sec_type += d;
+                if (sec_type < 0) sec_type = S_NTIPOS - 1;
+                if (sec_type >= S_NTIPOS) sec_type = 0;
                 use_fil = SEC[sec_type].fil_ok ? 1 : 0;
                 cur_dato = 0;
                 scr[1] = 0; scr[2] = 0; scr[3] = 0; scr[4] = 0;
@@ -1263,7 +1275,9 @@ static void handle_key(int key) {
             } else if (cur_tipo == 1) {
                 if (SEC[sec_type].fil_ok) { use_fil = !use_fil; recompute(); }
             } else {
-                uidx = (uidx + 3 + d) % 3;
+                uidx += d;
+                if (uidx < 0) uidx = 2;
+                if (uidx > 2) uidx = 0;
             }
         } else if (key == KEY_CTRL_EXE) {
             active_tab = 1;
@@ -1274,8 +1288,13 @@ static void handle_key(int key) {
         /* Ojo: en la API de Casio la tecla F4 y el digito 1 comparten el
            codigo 49, asi que aqui NO se abre el editor tecleando numeros:
            se abre con EXE y dentro de la ventana ya se teclea libremente. */
-        if (key == KEY_CTRL_UP || key == KEY_CTRL_LEFT) cur_dato = (cur_dato + nd - 1) % nd;
-        else if (key == KEY_CTRL_DOWN || key == KEY_CTRL_RIGHT) cur_dato = (cur_dato + 1) % nd;
+        if (key == KEY_CTRL_UP || key == KEY_CTRL_LEFT) {
+            cur_dato--;
+            if (cur_dato < 0) cur_dato = nd - 1;
+        } else if (key == KEY_CTRL_DOWN || key == KEY_CTRL_RIGHT) {
+            cur_dato++;
+            if (cur_dato >= nd) cur_dato = 0;
+        }
         else if (key == KEY_CTRL_EXE) {
             const char *lbl = (cur_dato < s->ndim) ? s->lbl[cur_dato] : "r";
             const char *dsc = (cur_dato < s->ndim) ? s->dsc[cur_dato] : "radio de acuerdo";
