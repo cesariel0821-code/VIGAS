@@ -990,19 +990,34 @@ static void render_tab_vm(void) {
     fill_rect(8, yi, 368, hinfo, C_WHITE);
     draw_rect(8, yi, 368, hinfo, C_BORDER);
 
-    /* los valores se colocan uno tras otro midiendo el texto, para que
-       un numero largo nunca se salga de la tarjeta */
+    /* x, V y M siempre visibles: si los tres no caben a lo ancho se
+       bajan decimales y, si hace falta, se quitan las unidades. */
+    char sx[40], sv[40], sm[40];
+    int dec = 2, uni = 1;
+    for (int intento = 0; intento < 4; intento++) {
+        fmt_num(num, diag_cursor_x, 2);
+        strcpy(sx, "x="); str_cat(sx, num); str_cat(sx, " m");
+        fmt_num(num, vc, dec);
+        strcpy(sv, "V="); str_cat(sv, num);
+        if (uni) str_cat(sv, " kN");
+        fmt_num(num, mc, dec);
+        strcpy(sm, "M="); str_cat(sm, num);
+        if (uni) str_cat(sm, " kNm");
+        if (tw_px(sx) + tw_px(sv) + tw_px(sm) + 4 * FW <= 352) break;
+        if (intento == 0) dec = 1;
+        else if (intento == 1) uni = 0;
+        else dec = 0;
+    }
+    int libre = 352 - tw_px(sx) - tw_px(sv) - tw_px(sm);
+    int gap = libre / 2;
+    if (gap < FW) gap = FW;
     int cxx = 14;
-    fmt_num(num, diag_cursor_x, 2);
-    strcpy(line, "<> x="); str_cat(line, num); str_cat(line, " m");
-    draw_text_bold(cxx, yi + 3, line, C_DGREEN, C_WHITE, 1);
-    cxx += tw_px(line) + 2 * FW;
-    fmt_num(num, vc, 2);
-    strcpy(line, "V="); str_cat(line, num);
-    if (cxx + tw_px(line) < 370) { draw_text_bold(cxx, yi + 3, line, C_BLUE, C_WHITE, 1); cxx += tw_px(line) + 2 * FW; }
-    fmt_num(num, mc, 2);
-    strcpy(line, "M="); str_cat(line, num);
-    if (cxx + tw_px(line) < 370) draw_text_bold(cxx, yi + 3, line, C_RED, C_WHITE, 1);
+    draw_text_bold(cxx, yi + 3, sx, C_DGREEN, C_WHITE, 1);
+    cxx += tw_px(sx) + gap;
+    draw_text_bold(cxx, yi + 3, sv, C_BLUE, C_WHITE, 1);
+    cxx += tw_px(sv) + gap;
+    if (cxx + tw_px(sm) > 370) cxx = 370 - tw_px(sm);
+    draw_text_bold(cxx, yi + 3, sm, C_RED, C_WHITE, 1);
 
     const char *enm[4] = { "V+", "V-", "M+", "M-" };
     double ev[4] = { vmax, vmin, mmax, mmin };
@@ -1100,13 +1115,17 @@ static void render_tab_ecuac(void) {
     y += 4;
 
     fmt_num(n1, xa, 2);
-    strcpy(ln, "con  u = x - "); str_cat(ln, n1);
+    strcpy(ln, "u = x - "); str_cat(ln, n1);
     if (y + FH < CY1) {
-        draw_text(16, y, ln, C_SLATE, C_WHITE, 1);
+        draw_text_bold(16, y, ln, C_SLATE, C_WHITE, 1);
+        y += ROW;
+    }
+    if (y + FH < CY1) {
+        draw_text(16, y, "u se mide desde el inicio", C_GRAY, C_WHITE, 1);
         y += ROW;
     }
     if (y + FH < CY1)
-        draw_text(16, y, "u2 es u al cuadrado", C_GRAY, C_WHITE, 1);
+        draw_text(16, y, "u2 = u al cuadrado", C_GRAY, C_WHITE, 1);
 }
 
 /* Pantalla 6 (F6): NUEVO / EJEMPLO */
