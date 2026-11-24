@@ -9,15 +9,34 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-sh-elf binutils-sh-elf cmake build-essential libpng-dev
-          git clone https://github.com/gbl08ma/libfxcg.git /tmp/libfxcg || git clone https://github.com/prizmsdk/libfxcg.git /tmp/libfxcg
-          make -C /tmp/libfxcg PREFIX=sh-elf-
-          git clone https://github.com/gbl08ma/mkg3a.git /tmp/mkg3a || git clone https://github.com/prizmsdk/mkg3a.git /tmp/mkg3a
-          cmake -B /tmp/mkg3a/build -S /tmp/mkg3a
-          cmake --build /tmp/mkg3a/build
+          for tool in gcc g++ ar as ld objcopy ranlib strip; do
+            sudo ln -sf /usr/bin/sh-elf-$tool /usr/local/bin/prizm-$tool
+          done
+          git clone https://github.com/gbl08ma/libfxcg.git /tmp/libfxcg
+          make -C /tmp/libfxcg
+          git clone https://github.com/gbl08ma/mkg3a.git /tmp/mkg3a
+          if [ -f /tmp/mkg3a/CMakeLists.txt ]; then
+            cmake -B /tmp/mkg3a/build -S /tmp/mkg3a && cmake --build /tmp/mkg3a/build
+          else
+            make -C /tmp/mkg3a && mkdir -p /tmp/mkg3a/build && cp /tmp/mkg3a/mkg3a /tmp/mkg3a/build/
+          fi
       - name: Compilar VIGAS.g3a
         run: |
-          sh-elf-gcc -m4a-nofpu -mb -O2 -I/tmp/libfxcg/include -c main.c -o main.o
-          sh-elf-gcc -m4a-nofpu -mb -T/tmp/libfxcg/toolchain/prizm.x -Wl,-static -nostdlib main.o -L/tmp/libfxcg/lib -lfxcg -lm -lgcc -o VIGAS.bin
+          cat << 'EOF' > /tmp/math_shim.c
+          double fabs(double x) { return x < 0.0 ? -x : x; }
+          double round(double x) { return x >= 0.0 ? (double)(long long)(x + 0.5) : (double)(long long)(x - 0.5); }
+          double sqrt(double x) {
+            if (x <= 0.0) return 0.0;
+            double r = x > 1.0 ? x : 1.0;
+            for (int i = 0; i < 30; i++) r = 0.5 * (r + x / r);
+            return r;
+          }
+          EOF
+          LDSCRIPT=$(find /tmp/libfxcg -name "prizm.x" | head -n 1)
+          LIBDIR=$(dirname $(find /tmp/libfxcg -name "libfxcg.a" | head -n 1))
+          prizm-gcc -m4a-nofpu -mb -O2 -I/tmp/libfxcg/include -c main.c -o main.o
+          prizm-gcc -m4a-nofpu -mb -O2 -c /tmp/math_shim.c -o /tmp/math_shim.o
+          prizm-gcc -m4a-nofpu -mb -T"$LDSCRIPT" -Wl,-static -nostdlib main.o /tmp/math_shim.o -L"$LIBDIR" -lfxcg -lgcc -o VIGAS.bin
           /tmp/mkg3a/build/mkg3a -n basic:VIGAS VIGAS.bin VIGAS.g3a
       - uses: actions/upload-artifact@v4
         with:
