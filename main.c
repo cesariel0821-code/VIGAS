@@ -427,7 +427,7 @@ static int edit_number(const char *title, const char *unit, double *target, int 
                 buf[len++] = '.';
                 buf[len] = '\0';
             }
-        } else if (key == KEY_CHAR_PM || key == KEY_CHAR_MINUS || key == '-') {
+        } else if (key == 0x87 || key == KEY_CHAR_MINUS || key == '-') {
             if (allow_neg) {
                 if (len == 0) {
                     buf[len++] = '-';
