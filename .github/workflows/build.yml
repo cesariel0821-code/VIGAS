@@ -9,9 +9,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-sh-elf binutils-sh-elf cmake build-essential libpng-dev
-          git clone https://gitlab.com/taricorp/libfxcg.git /tmp/libfxcg
+          git clone https://github.com/gbl08ma/libfxcg.git /tmp/libfxcg || git clone https://github.com/prizmsdk/libfxcg.git /tmp/libfxcg
           make -C /tmp/libfxcg PREFIX=sh-elf-
-          git clone https://gitlab.com/taricorp/mkg3a.git /tmp/mkg3a
+          git clone https://github.com/gbl08ma/mkg3a.git /tmp/mkg3a || git clone https://github.com/prizmsdk/mkg3a.git /tmp/mkg3a
           cmake -B /tmp/mkg3a/build -S /tmp/mkg3a
           cmake --build /tmp/mkg3a/build
       - name: Compilar VIGAS.g3a
