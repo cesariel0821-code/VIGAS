@@ -8,17 +8,22 @@ jobs:
       - name: Instalar compilador y librerias fx-CG50
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-sh-elf binutils-sh-elf cmake build-essential libpng-dev
+          sudo apt-get install -y gcc-sh-elf binutils-sh-elf build-essential
           for tool in gcc g++ ar as ld objcopy ranlib strip; do
             sudo ln -sf /usr/bin/sh-elf-$tool /usr/local/bin/prizm-$tool
           done
           git clone https://github.com/gbl08ma/libfxcg.git /tmp/libfxcg
           make -C /tmp/libfxcg
-          if git clone https://github.com/taricorp/mkg3a.git /tmp/mkg3a; then
-            cmake -B /tmp/mkg3a/build -S /tmp/mkg3a && cmake --build /tmp/mkg3a/build
-          fi
       - name: Compilar VIGAS.g3a
         run: |
+          cat << 'EOF' > /tmp/math_shim.h
+          #ifndef MATH_SHIM_H
+          #define MATH_SHIM_H
+          double fabs(double x);
+          double round(double x);
+          double sqrt(double x);
+          #endif
+          EOF
           cat << 'EOF' > /tmp/math_shim.c
           #include <stddef.h>
           double fabs(double x) { return x < 0.0 ? -x : x; }
@@ -69,34 +74,36 @@ jobs:
           EOF
           LDSCRIPT=$(find /tmp/libfxcg -name "prizm.x" | head -n 1)
           LIBDIR=$(dirname $(find /tmp/libfxcg -name "libfxcg.a" | head -n 1))
-          prizm-gcc -m4a-nofpu -mb -O2 -fno-builtin -I/tmp/libfxcg/include -c main.c -o main.o
+          prizm-gcc -m4a-nofpu -mb -O2 -fno-builtin -include /tmp/math_shim.h -I/tmp/libfxcg/include -c main.c -o main.o
           prizm-gcc -m4a-nofpu -mb -O2 -fno-builtin -c /tmp/math_shim.c -o /tmp/math_shim.o
           prizm-gcc -m4a-nofpu -mb -T"$LDSCRIPT" -Wl,-static -nostdlib main.o /tmp/math_shim.o -L"$LIBDIR" -Wl,--start-group -lfxcg -lc -lgcc -Wl,--end-group -o VIGAS.bin
-          if [ -f /tmp/mkg3a/build/mkg3a ]; then
-            /tmp/mkg3a/build/mkg3a -n basic:VIGAS VIGAS.bin VIGAS.g3a
-          else
+          if head -c 4 VIGAS.bin | grep -q $'\x7fELF'; then
             prizm-objcopy -O binary VIGAS.bin VIGAS_raw.bin
-            python3 -c '
+          else
+            cp VIGAS.bin VIGAS_raw.bin
+          fi
+          python3 -c '
           import struct
           raw = open("VIGAS_raw.bin", "rb").read()
           raw += b"\xFF" * ((4 - len(raw) % 4) % 4)
           hdr = bytearray(b"\xFF" * 0x7000)
-          hdr[0:8] = bytes([b ^ 0xFF for b in b"USBPower"])
-          hdr[8:16] = b"\xFE\xFF\xFF\xFF\xFF\xFF\x00\xFE"
+          hdr[0x00:0x08] = bytes([b ^ 0xFF for b in b"USBPower"])
+          hdr[0x08:0x10] = b"\xFE\xFF\xFF\xFF\xFF\xFF\x00\xFE"
           total = 0x7000 + len(raw)
           hdr[0x10:0x14] = struct.pack(">I", total ^ 0xFFFFFFFF)
-          hdr[0x30:0x36] = b"@VIGAS"
-          hdr[0x40:0x4A] = b"01.00.0000"
-          hdr[0x50:0x5E] = b"2026.1124.0821"
-          for off in range(0x5C60, 0x5C60 + 8*24, 24):
-              hdr[off:off+5] = b"VIGAS"
+          csum_hdr = sum(hdr[0x00:0x14]) & 0xFFFFFFFF
+          hdr[0x14:0x18] = struct.pack(">I", csum_hdr ^ 0xFFFFFFFF)
+          hdr[0x30:0x37] = b"@VIGAS\x00"
+          hdr[0x40:0x4B] = b"01.00.0000\x00"
+          hdr[0x50:0x5F] = b"2026.1124.0825\x00"
+          for i in range(8):
+              off = 0x60 + i * 24
+              hdr[off:off+6] = b"VIGAS\x00"
           hdr[0x6FF4:0x6FF8] = struct.pack(">I", len(raw))
-          hdr[0x20:0x24] = b"\x00\x00\x00\x00"
-          csum = (sum(hdr[0:0x20]) + sum(hdr[0x24:]) + sum(raw)) & 0xFFFFFFFF
-          hdr[0x20:0x24] = struct.pack(">I", csum)
+          csum_body = (sum(hdr[0x24:]) + sum(raw)) & 0xFFFFFFFF
+          hdr[0x20:0x24] = struct.pack(">I", csum_body)
           open("VIGAS.g3a", "wb").write(hdr + raw)
           '
-          fi
       - uses: actions/upload-artifact@v4
         with:
           name: VIGAS-fxCG50
