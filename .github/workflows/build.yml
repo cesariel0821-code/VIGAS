@@ -51,6 +51,29 @@ jobs:
               }
             }
           }
+          unsigned int __udivsi3_i4i(unsigned int n, unsigned int d) {
+            if (d == 0) return 0;
+            unsigned int q = 0, r = 0;
+            for (int i = 0; i < 32; i++) {
+              unsigned int carry = r >> 31;
+              r = (r << 1) | (n >> 31);
+              n <<= 1;
+              q <<= 1;
+              if (carry || r >= d) {
+                r -= d;
+                q |= 1U;
+              }
+            }
+            return q;
+          }
+          int __sdivsi3_i4i(int a, int b) {
+            if (b == 0) return 0;
+            int neg = (a < 0) ^ (b < 0);
+            unsigned int ua = (a < 0) ? (0U - (unsigned int)a) : (unsigned int)a;
+            unsigned int ub = (b < 0) ? (0U - (unsigned int)b) : (unsigned int)b;
+            unsigned int uq = __udivsi3_i4i(ua, ub);
+            return neg ? (int)(0U - uq) : (int)uq;
+          }
           EOF
           LDSCRIPT=$(find /tmp/libfxcg -name "prizm.x" | head -n 1)
           LIBDIR=$(dirname $(find /tmp/libfxcg -name "libfxcg.a" | head -n 1))
