@@ -77,6 +77,7 @@ jobs:
           EOF
           LDSCRIPT=$(find /tmp/libfxcg -name "prizm.x" | head -n 1)
           LIBDIR=$(dirname $(find /tmp/libfxcg -name "libfxcg.a" | head -n 1))
+          MKG3A=$(find /tmp/mkg3a -type f -name "mkg3a" -executable | head -n 1)
           prizm-gcc -m4a-nofpu -mb -O2 -fno-builtin -include /tmp/math_shim.h -I/tmp/libfxcg/include -c main.c -o main.o
           prizm-gcc -m4a-nofpu -mb -O2 -fno-builtin -c /tmp/math_shim.c -o /tmp/math_shim.o
           prizm-gcc -m4a-nofpu -mb -T"$LDSCRIPT" -Wl,-static -nostdlib main.o /tmp/math_shim.o -L"$LIBDIR" -Wl,--start-group -lfxcg -lc -lgcc -Wl,--end-group -o VIGAS.bin
@@ -85,7 +86,7 @@ jobs:
           else
             cp VIGAS.bin VIGAS_raw.bin
           fi
-          /tmp/mkg3a/build/mkg3a -n basic:VIGAS VIGAS_raw.bin VIGAS.g3a
+          "$MKG3A" -n basic:VIGAS VIGAS_raw.bin VIGAS.g3a
       - uses: actions/upload-artifact@v4
         with:
           name: VIGAS-fxCG50
