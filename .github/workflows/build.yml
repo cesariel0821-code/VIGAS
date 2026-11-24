@@ -5,16 +5,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Instalar PrizmSDK y compilar
+      - name: Instalar compilador y librerias fx-CG50
         run: |
-          git clone https://github.com/Jonimus/PrizmSDK.git /opt/PrizmSDK
-          mkdir -p /opt/PrizmSDK/projects/VIGAS/src
-          cp main.c /opt/PrizmSDK/projects/VIGAS/src/main.c
-          cp -r /opt/PrizmSDK/projects/example/* /opt/PrizmSDK/projects/VIGAS/
-          cp main.c /opt/PrizmSDK/projects/VIGAS/src/main.c
-          export PATH="/opt/PrizmSDK/bin:$PATH"
-          make -C /opt/PrizmSDK/projects/VIGAS
-          cp /opt/PrizmSDK/projects/VIGAS/*.g3a ./VIGAS.g3a
+          sudo apt-get update
+          sudo apt-get install -y gcc-sh-elf binutils-sh-elf cmake build-essential libpng-dev
+          git clone https://gitlab.com/taricorp/libfxcg.git /tmp/libfxcg
+          make -C /tmp/libfxcg PREFIX=sh-elf-
+          git clone https://gitlab.com/taricorp/mkg3a.git /tmp/mkg3a
+          cmake -B /tmp/mkg3a/build -S /tmp/mkg3a
+          cmake --build /tmp/mkg3a/build
+      - name: Compilar VIGAS.g3a
+        run: |
+          sh-elf-gcc -m4a-nofpu -mb -O2 -I/tmp/libfxcg/include -c main.c -o main.o
+          sh-elf-gcc -m4a-nofpu -mb -T/tmp/libfxcg/toolchain/prizm.x -Wl,-static -nostdlib main.o -L/tmp/libfxcg/lib -lfxcg -lm -lgcc -o VIGAS.bin
+          /tmp/mkg3a/build/mkg3a -n basic:VIGAS VIGAS.bin VIGAS.g3a
       - uses: actions/upload-artifact@v4
         with:
           name: VIGAS-fxCG50
